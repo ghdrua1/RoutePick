@@ -1,0 +1,18 @@
+# RoutePick 프로젝트 의존성
+
+# API 클라이언트
+tavily-python>=0.3.0
+googlemaps>=4.10.0
+openai>=1.0.0
+
+# 비동기 처리
+aiohttp>=3.9.0
+asyncio>=3.4.3
+
+# 데이터 처리
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# 유틸리티
+requests>=2.31.0
+

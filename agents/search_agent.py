@@ -1,6 +1,7 @@
 import json
 import asyncio
 import os
+import random # 🎲 3번 처방: 셔플링을 위해 추가
 from typing import Any, Dict, Optional, List
 from openai import AsyncOpenAI
 import googlemaps
@@ -46,16 +47,16 @@ class SearchAgent(BaseAgent):
         
 
         # 2. Tavily 멀티 검색 (본문 데이터 확보)
-        print(f"📡 [Step 2] Tavily를 통해 실시간 데이터 수집 중...")
+        print(f"📡 [Step 2] Tavily를 통해 방대한 실시간 데이터 수집 중... (60개 후보 탐색)")
 
         tasks = [
-            self.search_tool.execute(query=step['search_query'], max_results=10) 
+            self.search_tool.execute(query=step['search_query'], max_results=20) 
             for step in strategy['course_structure']
         ]
         search_results = await asyncio.gather(*tasks)
         
-        # ⭐ [여기서부터 추가/수정] 3. LLM 엔티티 추출 단계 (핵심 기획)
-        print(f"📝 [Step 3] LLM이 검색 결과에서 진짜 장소명만 추출 중...")
+        
+        print(f"📝 [Step 3-1] LLM이 검색 결과에서 진짜 장소명만 추출 중...")
         # 3. LLM 엔티티 추출 및 URL 보존
         all_raw_data = []
         for res in search_results:
@@ -66,76 +67,132 @@ class SearchAgent(BaseAgent):
                         "url": p['source_url'],
                         "text": f"제목: {p['name']}, 본문: {p['description']}"
                     })
-                    
+                
+        # 데이터 순서를 섞어서 특정 카테고리 쏠림 방지
+        random.shuffle(all_raw_data) 
+        print(f"📝 [Step 3-2] LLM이 60개 원문 전체를 전수 조사 중...")
+        
         # [Step 3 수정] 이름과 카테고리를 함께 추출
         # 수정된 추출 함수 호출
         refined_data = await self._extract_place_entities_with_source(all_raw_data, location)
 
+        #  LLM의 성실도 체크
+        print(f"   ✅ LLM이 60개 데이터에서 발굴한 유니크 장소: {len(refined_data)}개")
+
+        # 인기도(언급 횟수) 계산
+        # 어떤 장소가 60개 검색 결과 중 여러 번 등장했는지 카운트합니다.
+        mention_counts = {}
+        for item in refined_data:
+            name = item.get('name')
+            mention_counts[name] = mention_counts.get(name, 0) + 1
+
         # 4. Google Maps 기반 검증
-        candidate_pool = []
+        category_buckets = {} # 카테고리별로 장소를 담을 바구니
         seen_names = set() # 중복 제거용
 
         for item in refined_data:
             # 이제 name뿐만 아니라 category도 item 안에 들어있습니다.
             place_name = item.get('name')
-            place_category = item.get('category', '장소') # 기본값 설정
+            place_category = item.get('category', '기타') # 기본값 설정
             
             clean_name = self._clean_place_name(place_name)
             google_info = self._get_google_data(clean_name, location)
     
-                
-            # [핵심] 카테고리에 따른 유연한 필터링
+            # 카테고리에 따른 유연한 필터링
             is_valid = False
-            cat = item['category']
+            cat = place_category
             
-            if cat in ['식당', '카페']:
-                # 식당/카페는 평점이 중요함
-                if google_info and google_info['rating'] >= 4.0:
-                    is_valid = True
-            else:
-                # 팝업, 전시, 활동 등은 평점이 없어도(0.0) 존재만 확인되면 통과
-                if google_info: 
-                    is_valid = True
-                elif item['name']: # 구글에 없어도 Tavily에서 여러 번 언급되면 통과 (최신 팝업 대비)
-                    is_valid = True
-                    google_info = {"name": item['name'], "rating": 0.0, "reviews_count": 0, "address": "위치 정보 확인 필요"}
+            if google_info:
+                g_rating = google_info['rating']
+                # [강력 처방] 평점이 0.1~3.0 사이라면 '진짜 나쁜 곳' 혹은 '부동산'임. 가차없이 커트!
+                if 0.1 <= g_rating < 3.0:
+                    print(f"   - [Hard Cut] {google_info['name']}: 평점 {g_rating} (품질 미달)")
+                    continue
 
+                if cat in ['식당', '카페']:
+                    if g_rating >= 4.0: is_valid = True
+                else:
+                    is_valid = True # 평점 0.0(신규) 이거나 3.0 이상인 활동/관광지는 통과
+            
+            elif cat in ['활동', '관광지', '쇼핑']:
+                # 구글에 없어도 LLM이 추출했다면 '최신 팝업'일 가능성이 높으므로 통과
+                is_valid = True
+                google_info = {"name": place_name, "rating": 0.0, "reviews_count": 0, "address": "주소 정보 확인 필요"}
+            
+            
             if is_valid:
                 g_name = google_info['name']
                 if g_name in seen_names: continue
+
+                # all_raw_data에서 이 장소의 원본 텍스트를 찾아옵니다.
+                # item['source_url']과 일치하는 원문을 검색
+                original_desc = ""
+                for raw in all_raw_data:
+                    if raw['url'] == item.get('source_url'):
+                        original_desc = raw['text']
+                        break
  
-                # V2 점수 계산기 사용
-                trust_score = self._calculate_trust_score_v2(
-                    google_info['rating'], google_info['reviews_count'], item.get('text', ''), cat
+                # [V3 업그레이드] 언급 횟수(Mentions)를 점수 계산기에 전달
+                trust_score = self._calculate_trust_score_v3(
+                    google_info['rating'], 
+                    google_info['reviews_count'], 
+                    original_desc, 
+                    cat,
+                    mention_counts.get(place_name, 1) # 언급 횟수 추가
                 )
 
-                               # 🔗 URL 인코딩 처리 (공백을 +로 치환하여 클릭 가능하게)
+                # 🔗 URL 인코딩 처리 (공백을 +로 치환하여 클릭 가능하게)
                 encoded_name = g_name.replace(" ", "+")
                 map_url = f"https://www.google.com/maps/search/?api=1&query={encoded_name}+{location.replace(' ', '+')}"
 
                 print(f"   - [Keep] {google_info['name']} (평점: {google_info['rating']})")
                 
-                candidate_pool.append({
+                place_obj = {
                     "name": g_name,
-                    "category": place_category,
+                    "category": cat,
                     "rating": google_info['rating'],
                     "trust_score": trust_score,
                     "address": google_info['address'],
-                    "source_url": item.get('source_url'), # 블로그/뉴스 링크
-                    "map_url": map_url                    # 구글 지도 링크
-                })
+                    "source_url": item.get('source_url'),
+                    "map_url": map_url
+                }
+
+                # [핵심 추가] 바구니에 담기
+                if cat not in category_buckets:
+                    category_buckets[cat] = []
+                category_buckets[cat].append(place_obj)
+
                 seen_names.add(g_name)
 
 
-        # 신뢰도 점수(Trust Score) 순으로 정렬하여 가장 쌈뽕한 곳을 위로
-        candidate_pool.sort(key=lambda x: x['trust_score'], reverse=True)
+        # ============================================================
+        # 5. [라운드 로빈 선발] 다양성 보장 로직
+        # ============================================================
+        final_pool = []
+        TOTAL_LIMIT = 18
+
+        for cat in category_buckets:
+            category_buckets[cat].sort(key=lambda x: x['trust_score'], reverse=True)
+
+        active_cats = list(category_buckets.keys())
+
+        while len(final_pool) < TOTAL_LIMIT and active_cats:
+            cats_to_remove = []
+            for cat in active_cats:
+                if len(final_pool) >= TOTAL_LIMIT: break
+                if category_buckets[cat]:
+                    final_pool.append(category_buckets[cat].pop(0))
+                else:
+                    cats_to_remove.append(cat)
+            for cat in cats_to_remove:
+                active_cats.remove(cat)
         
         # SearchAgent.execute()의 리턴값 다음 에이전트에게 줄 '최종 패키지'
         return {
             "success": True,
             "agent_name": self.name,
             "action_analysis": strategy.get('action_analysis'),
-            "candidate_pool": candidate_pool,
+            "candidate_pool": final_pool,
             "user_intent": {
                 "course_structure": strategy.get('course_structure'),
                 # 여기에 reasoning 정보가 step별로 포함되어 있어 데이터가 휘발되지 않음
@@ -147,128 +204,148 @@ class SearchAgent(BaseAgent):
 
     async def _extract_place_entities_with_source(self, raw_data: List[Dict], location: str) -> List[Dict]:
         """
-        [최종형] 기존 Slop 제거 로직을 유지하며, 각 장소에 원본 URL을 매칭함.
+        [최종 고도화 버전] 
+        - 60개 이상의 대량 데이터를 처리하기 위해 중복 제거 및 핵심 상호명 추출 로직 강화.
+        - 구글 API 비용 절감을 위해 LLM 단계에서 1차 중복 제거 수행.
         """
         if not raw_data: return []
 
         prompt = f"""
-        당신은 정보 정제 및 여행 데이터 전문가입니다. 
-        제공된 [검색 결과 데이터]를 분석하여 {location} 지역의 구체적인 '장소 이름(가게명, 카페명, 전시장명 등)'을 추출하고 카테고리를 분류하세요.
-        또한, 각 장소가 어떤 'url'에서 추출되었는지 반드시 함께 기록해야 합니다.
+        당신은 방대한 웹 데이터를 분석하여 가치 있는 장소 정보만 골라내는 '여행 정보 마이닝 전문가'입니다. 
+        제공된 {len(raw_data)}개의 검색 결과에서 {location} 지역의 진짜 '장소명'을 추출하고 분류하세요.
 
-        [임무 1: 엄격한 장소 이름 정제 (Slop 제거)]
-        - 고유 명칭만 남기세요. (예: '성수동 힙한 카페 베이크모굴' -> '베이크모굴')
-        - 일반 명사(맛집, 데이트 코스, 성수동 놀거리 등)는 절대 추출하지 말고 무시하세요.
-        - 수식어(분위기 좋은, 맛있는, 핫플 등)를 완전히 제거하세요.
-        - 블로그 제목 전체가 아닌, 그 안에서 언급된 '가게/장소의 이름'만 찾아내야 합니다.
+        [임무 1: 데이터 정제 및 중복 제거 (필수)]
+        - 동일한 장소가 여러 검색 결과에 나타날 경우, 가장 정보가 알찬 하나의 결과로 통합하세요.
+        - 수식어와 일반 명사를 제거한 '순수 상호명'만 남기세요. (예: '성수동 핫플 카페 어니언' -> '어니언')
+        - 한 포스팅에 여러 장소가 있다면 모두 개별적으로 추출하세요.
 
-        [임무 2: 카테고리 분류 및 URL 매칭]
-        - 카테고리: [식당, 카페, 활동, 쇼핑, 숙소, 기타] 중 선택하세요.
-        - URL: 제공된 데이터의 'url' 필드 값을 그대로 사용하세요.
+        [임무 2: 엄격한 필터링]
+        - '맛집', '코스', '여행지', '데이트 장소'와 같은 일반 명칭은 장소명에서 제외하세요.
+        - 구글 지도에서 검색했을 때 정확히 위치가 나올 법한 고유 명사여야 합니다.
+        - '관광객이 직접 방문하여 시간을 보낼 수 있는 실체가 있는 장소'만 추출하세요.
+        - 제외 대상: 부동산, 추진위원회, 아파트 단지명, 단순 지역명, 공공기관, 기업 사무실.
+
+
+        [임무 3: 카테고리 분류 및 출처 매핑]
+        - 카테고리: [식당, 카페, 활동, 쇼핑, 숙소, 관광지, 기타] 중 선택하세요.
+        - '관광지' 카테고리는 공원, 랜드마크, 역사적 장소 등 실제로 구경할 거리가 있는 곳에만 부여하세요.
+        - 출처: 해당 장소가 언급된 데이터의 'url' 필드 값을 정확히 매칭하세요.
+
+        [임무 4: 전수 조사 및 개수 확보 (중요)]
+        - 데이터가 방대합니다. 대충 요약하지 말고, 제공된 모든 텍스트를 샅샅이 뒤져서 가능한 많은 유니크 장소를 추출하세요.
+        - 최소 25개 이상의 고유 장소 추출을 목표로 합니다.
 
         [분석할 데이터]
-        {raw_data[:15]}
+        {raw_data}
 
         [응답 형식 (JSON 고정)]
         {{
-        "results": [
+          "results": [
             {{
-            "name": "장소명",
-            "category": "식당",
-            "source_url": "해당 데이터의 원본 url"
+              "name": "장소명",
+              "category": "카테고리",
+              "source_url": "데이터에 제공된 실제 url"
             }}
-        ]
+          ]
         }}
         """
         try:
+            # 60개 데이터는 텍스트 양이 많으므로 gpt-4o-mini 모델을 쓰는 것을 추천합니다 (속도/비용)
             response = await self.client.chat.completions.create(
                 model=self.llm_model,
-                messages=[{"role": "system", "content": "You are a professional data cleaner. Output only JSON."},
-                        {"role": "user", "content": prompt}],
+                messages=[{"role": "system", "content": "You are a professional data miner. Output only JSON."},
+                          {"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
             data = json.loads(response.choices[0].message.content)
+            # LLM이 뱉은 결과 리스트
             return data.get("results", [])
         except Exception as e:
             print(f"❌ 엔티티 추출 에러: {e}")
             return []
+        
 
     #(예: 대화 중심, 활동 중심, 휴식 중심)
     #(예: 조용한 카페, 실내 전시장, 분위기 있는 식당)
 
     async def _generate_strategy(self, theme: str, location: str) -> Optional[Dict]:
-            """
-            [핵심 페르소나 반영] 테마 분석 및 검색 전략 수립
-            """
-            prompt = f"""
-            당신은 베테랑 여행 설계자입니다. 사용자의 테마를 분석하여 최적의 '코스 구조'를 설계하고, 각 구조를 채울 검색 쿼리를 생성하세요.
+        """
+        [최종 고도화] 시스템 표준 카테고리와 전략을 일치시켜 데이터 유실을 방지함.
+        """
+        # 시스템에서 정의한 7개 표준 카테고리 (Step 3의 분류와 일치시켜야 함)
+        valid_categories = ["식당", "카페", "활동", "쇼핑", "숙소", "관광지", "기타"]
 
-            [사용자 입력]
-            - 테마: {theme}
-            - 지역: {location}
+        prompt = f"""
+        당신은 베테랑 여행 설계자입니다. 사용자의 테마를 분석하여 최적의 '코스 구조'를 설계하고, 각 구조를 채울 검색 전략을 수립하세요.
 
-            [임무]
-            1. 이 테마에 필요한 '행동 타입(Action Types)'을 3가지 분석하세요. 
-            2. 각 행동에 맞는 '장소 카테고리'를 결정하세요.
-            3. 각 카테고리별로 Tavily 검색을 위한 최적화된 '검색 쿼리'와 그 쿼리를 선정한 '판단 근거'를 생성하세요.
-            (팁: '추천', '리스트', '리뷰', '베스트' 같은 단어를 섞어야 구체적인 가게 이름이 잘 나옵니다.)
+        [사용자 입력]
+        - 테마: {theme}
+        - 지역: {location}
 
-            [응답 형식 (JSON 고정)]
+        [임무]
+        1. 이 테마에 필요한 '행동 타입(Action Types)'을 3가지 분석하세요. 
+        2. 각 행동을 만족하기 위해 아래 [표준 카테고리 리스트] 중 가장 적합한 카테고리를 하나씩 매칭하세요.
+           - 표준 카테고리: {valid_categories}
+        
+        3. 각 단계별로 Tavily 검색을 위한 '최적화된 검색 쿼리'와 그 쿼리를 선정한 '판단 근거(reasoning)'를 생성하세요.
+           (팁: '추천', '리스트', '리뷰', '베스트' 같은 단어를 섞어야 구체적인 가게 이름이 잘 나옵니다.)
+
+        [응답 형식 (JSON 고정)]
+        {{
+          "action_analysis": "행동 타입 분석 요약",
+          "course_structure": [
             {{
-            "action_analysis": "행동 타입 분석 요약",
-            "course_structure": [
-                {{
-                "step": 1, 
-                "category": "카테고리명", 
-                "search_query": "쿼리", 
-                "reasoning": "이 쿼리를 선정한 이유"
-                }},
-                {{
-                "step": 2, 
-                "category": "카테고리명", 
-                "search_query": "쿼리", 
-                "reasoning": "이 쿼리를 선정한 이유"
-                }},
-                {{
-                "step": 3, 
-                "category": "카테고리명", 
-                "search_query": "쿼리", 
-                "reasoning": "이 쿼리를 선정한 이유"
-                }}
-            ]
+              "step": 1, 
+              "category": "위 표준 리스트 중 하나", 
+              "search_query": "파워 키워드가 포함된 검색어", 
+              "reasoning": "이 쿼리를 선정한 이유"
+            }},
+            {{
+              "step": 2, 
+              "category": "위 표준 리스트 중 하나", 
+              "search_query": "파워 키워드가 포함된 검색어", 
+              "reasoning": "이 쿼리를 선정한 이유"
+            }},
+            {{
+              "step": 3, 
+              "category": "위 표준 리스트 중 하나", 
+              "search_query": "파워 키워드가 포함된 검색어", 
+              "reasoning": "이 쿼리를 선정한 이유"
             }}
-            """
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.llm_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"}
-                )
-                return json.loads(response.choices[0].message.content)
+          ]
+        }}
+        """
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+            return json.loads(response.choices[0].message.content)
 
-            except Exception as e:
-                print(f"⚠️ LLM 호출 실패(쿼터 초과 등): {e}")
-                # Mock 데이터에서도 'reasoning' 필드를 유지하여 데이터 유실 방지
-                return {
-                    "action_analysis": f"{theme}을(를) 위한 실내외 혼합 활동 및 동선 최적화 전략",
-                    "course_structure": [
-                        {
-                            "step": 1, "category": "카페", 
-                            "search_query": f"{location} {theme} 분위기 좋은 카페",
-                            "reasoning": "테마에 맞는 아늑한 분위기 형성을 위해 첫 번째 코스로 선정"
-                        },
-                        {
-                            "step": 2, "category": "활동", 
-                            "search_query": f"{location} {theme} 팝업스토어 전시회",
-                            "reasoning": "지루함을 방지하고 테마의 핵심 경험을 제공하기 위한 메인 활동 선정"
-                        },
-                        {
-                            "step": 3, "category": "식사", 
-                            "search_query": f"{location} {theme} 맛집 추천",
-                            "reasoning": "활동 후 만족스러운 마무리를 위한 현지 인기 식당 탐색"
-                        }
-                    ]
-                }
+        except Exception as e:
+            print(f"⚠️ LLM 호출 실패(쿼터 초과 등): {e}")
+            # Mock 데이터에서도 표준 카테고리 명칭을 사용하여 에러 방지
+            return {
+                "action_analysis": f"{theme}을(를) 위한 실내외 혼합 활동 및 동선 최적화 전략",
+                "course_structure": [
+                    {
+                        "step": 1, "category": "카페", 
+                        "search_query": f"{location} {theme} 분위기 좋은 카페 추천",
+                        "reasoning": "테마에 맞는 아늑한 분위기 형성을 위해 첫 번째 코스로 선정"
+                    },
+                    {
+                        "step": 2, "category": "활동", 
+                        "search_query": f"{location} {theme} 실내 놀거리 전시 베스트",
+                        "reasoning": "지루함을 방지하고 테마의 핵심 경험을 제공하기 위한 메인 활동 선정"
+                    },
+                    {
+                        "step": 3, "category": "식사", 
+                        "search_query": f"{location} {theme} 맛집 리스트 리뷰",
+                        "reasoning": "활동 후 만족스러운 마무리를 위한 현지 인기 식당 탐색"
+                    }
+                ]
+            }
 
     ## 한번 추가해보는 청소기
     def _clean_place_name(self, raw_name: str) -> str:
@@ -321,38 +398,34 @@ class SearchAgent(BaseAgent):
             return None
         return None
     
-    def _calculate_trust_score_v2(self, google_rating: float, google_reviews: int, content: str, category: str) -> float:
+    def _calculate_trust_score_v3(self, google_rating: float, google_reviews: int, content: str, category: str, mention_count: int) -> float:
         """
-        [V2] 카테고리별 차등 신뢰도 점수 로직
-        - 식당/카페: 구글 평점의 비중이 높음
-        - 활동/팝업/전시: 평점이 낮거나 없어도 최신 키워드(오픈, 핫플)에 가산점 부여
+        [V3] 인기도(Mention Count)가 반영된 최종 신뢰도 점수
         """
-        # 1. 기본 점수 설정
-        if category in ['활동', '쇼핑', '기타'] and google_rating == 0:
-            # 평점이 없는 최신 전시/팝업은 기본 점수를 4.0으로 보정 (발굴 가치 부여)
-            base_score = 4.0
-        else:
-            base_score = google_rating
-
-        score = base_score
-
-        # 2. 보조 지표 1: 리뷰 수 가산점 (모든 카테고리 공통)
+        # 1. 기본 점수 (평점 0.0인 최신 장소는 4.0점에서 시작)
+        score = google_rating if google_rating > 0 else 4.0
+        
+        # 2. 보조 지표 1: 구글 리뷰 수 (공식 인기도)
         if google_reviews > 500: score += 0.2
         elif google_reviews > 100: score += 0.1
     
-        # 3. 보조 지표 2: 키워드 가산점 (카테고리별 차등)
-        # 기존 '내돈내산' 등은 유지
+        # 3. 보조 지표 2: 웹 언급 횟수 (트렌드 인기도)
+        # 여러 블로그/사이트에서 공통으로 발견될수록 가산점 부여 (최대 0.4)
+        if mention_count > 1:
+            score += (mention_count - 1) * 0.15
+
+        # 4. 보조 지표 3: 키워드 가산점
         trust_keywords = ['내돈내산', '솔직후기', '분위기', '친절']
         for kw in trust_keywords:
             if kw in content: score += 0.05
             
-        # [추가] 활동/팝업 전용 키워드 가산점
-        if category in ['활동', '쇼핑', '기타']:
-            trend_keywords = ['최신', '팝업', '전시', '오픈', '핫플', '기간한정']
-            for kw in trend_keywords:
-                if kw in content: score += 0.1 # 활동형 장소는 트렌드 점수를 더 높게 줌
+        # 활동/관광지 전용 트렌드 키워드
+        if category in ['활동', '쇼핑', '관광지']:
+            if any(kw in content for kw in ['최신', '팝업', '오픈', '핫플']):
+                score += 0.1
 
         return round(min(score, 5.0), 2)
+
 
     def validate_input(self, input_data: Dict[str, Any]) -> bool:
         """BaseAgent의 필수 구현 추상 메서드"""

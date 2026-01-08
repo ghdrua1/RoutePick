@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import openai
 from typing import Any, Dict, List, Optional
 from .base_tool import BaseTool
@@ -25,8 +26,17 @@ class CourseCreationTool(BaseTool):
         
         # LLM 설정
         self.llm_model = self.config.get("llm_model", "gpt-4o-mini")
-        self.api_key = self.config.get("api_key") or self.config.get("openai_api_key")
-        self.client = openai.AsyncOpenAI()
+        # OpenAI API 키 우선순위: openai_api_key > api_key > 환경 변수
+        self.api_key = (
+            self.config.get("openai_api_key") or 
+            self.config.get("api_key") or 
+            os.getenv("OPENAI_API_KEY")
+        )
+        if self.api_key:
+            self.client = openai.AsyncOpenAI(api_key=self.api_key)
+        else:
+            # 환경 변수에서 직접 로드
+            self.client = openai.AsyncOpenAI()
         # LLM 클라이언트 초기화 (실제 구현 시 사용)
         # 예: OpenAI, Anthropic, 등
         # self.client = OpenAI(api_key=self.api_key)
@@ -177,9 +187,11 @@ class CourseCreationTool(BaseTool):
         prompt = f"""
         # Role
         당신은 현지 지리에 능통하고 모든 장소를 방문해본 여행 가이드입니다. 당신은 효율적인 경로 설계에 능통합니다.
+        **당신의 임무는 제공된 장소 리스트에서 최적의 코스를 선택하고 JSON 형식으로 반환하는 것입니다.**
         
         # Context
         사용자의 선호 조건과 제공된 장소 데이터를 바탕으로 최적의 여행 코스를 설계합니다.
+        제공된 장소 정보를 바탕으로 작업을 수행하세요. 현재 정보가 부족하더라도 제공된 정보만으로 최선의 코스를 설계하세요.
         
         # Input Data
         - 장소 리스트 : {self._format_places_for_prompt(places)}
@@ -205,10 +217,16 @@ class CourseCreationTool(BaseTool):
         3. 선정된 순서가 실제 방문 가능 시간(영업시간) 내에 있는지 검증합니다.
         4. 모든 논리적 검증이 끝나면 최종 JSON을 출력합니다.
 
+        # IMPORTANT: Output Format
+        **당신은 반드시 이 작업을 수행해야 합니다. 작업을 거부하거나 설명을 제공하지 마세요.**
+        **오직 JSON 형식만 출력하세요. 다른 텍스트, 설명, 마크다운 헤더는 절대 포함하지 마세요.**
+
         ---
 
         ## Return Value
-        코스 설계 완료 후, 다음의 JSON 파일 형식으로 답변을 완성하세요.
+        코스 설계 완료 후, **반드시 다음의 JSON 형식만** 출력하세요. 다른 설명이나 텍스트는 포함하지 마세요.
+        
+        ```json
         {{
             "selected_places": [장소 인덱스 리스트],
             "sequence": [방문 순서],
@@ -216,24 +234,90 @@ class CourseCreationTool(BaseTool):
             "course_description": "코스 설명",
             "reasoning": "선정 이유"
         }}
+        ```
 
         ### OUTPUT Rules
-        "course_description" 에는 방문하는 각각의 장소에 대한 간단한 설명들을 첨부합니다.
-        "reasoning" 에는 인덱스를 **장소이름(인덱스)** 형태로 언급하고, 인덱스에 해당하는 장소에 대한 설명을 바탕으로 사용자 선호 조건 중 만족시킨 사항들을 설명합니다.
-        "reasoning" 을 생성할 때, 방문하는 장소들의 순서 및 이동수단 설계 과정에 대해 설명하세요.
+        - "selected_places"는 1부터 시작하는 장소 인덱스 리스트입니다 (예: [0, 2, 4])
+        - "sequence"는 선택된 장소들의 방문 순서를 인덱스로 나타냅니다 (예: [0, 1, 2]는 첫 번째, 두 번째, 세 번째로 선택된 장소의 순서)
+        - "estimated_duration"은 장소 인덱스를 키로 하고 체류 시간(분)을 값으로 하는 객체입니다 (예: {{"0": 60, "2": 90, "4": 45}})
+        - "course_description"에는 방문하는 각각의 장소에 대한 간단한 설명들을 첨부합니다.
+        - "reasoning"에는 인덱스를 **장소이름(인덱스)** 형태로 언급하고, 인덱스에 해당하는 장소에 대한 설명을 바탕으로 사용자 선호 조건 중 만족시킨 사항들을 설명합니다.
+        - "reasoning"을 생성할 때, 방문하는 장소들의 순서 및 이동수단 설계 과정에 대해 설명하세요.
+        
         설명 예시:
         - 장소 A와 장소 C 사이에 장소 B가 있고, 다시 장소 A 주변 지역을 가지 않을 예정이기에 A-B-C 순서로 일정을 설계하였습니다.
         - 방문 기간이 오후이기 때문에, 잠시 쉬어가기 위해 장소 A와 장소 C 사이에 **카페** B를 먼저 방문합니다.
         - 장소 A와 장소 B 사이에 오르막길이 길게 있고 도보 시간이 15분 이상 걸리기 때문에, 이동수단으로 **버스**를 선택했습니다.
+        
+        **중요: JSON 형식만 출력하고, 다른 텍스트는 포함하지 마세요.**
         """
 
         response = await self.client.chat.completions.create(
             model=self.llm_model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
+            messages=[
+                {"role": "system", "content": "You are a professional travel course planner. You MUST output only valid JSON format. Never refuse the task or provide explanations outside JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,  # 충분한 토큰 할당
+            temperature=0.3  # 일관된 JSON 형식 유지
         )
-        # 
-        result = json.loads(response.choices[0].message.content)
+        
+        # 응답에서 JSON 추출
+        response_content = response.choices[0].message.content.strip()
+        
+        # JSON 부분만 추출 (마크다운 코드 블록 제거)
+        if "```json" in response_content:
+            json_start = response_content.find("```json") + 7
+            json_end = response_content.find("```", json_start)
+            if json_end == -1:
+                json_end = len(response_content)
+            response_content = response_content[json_start:json_end].strip()
+        elif "```" in response_content:
+            json_start = response_content.find("```") + 3
+            json_end = response_content.find("```", json_start)
+            if json_end == -1:
+                json_end = len(response_content)
+            response_content = response_content[json_start:json_end].strip()
+        
+        # JSON 객체 시작/끝 찾기 (중괄호 기준)
+        json_start_idx = response_content.find("{")
+        json_end_idx = response_content.rfind("}") + 1
+        if json_start_idx != -1 and json_end_idx > json_start_idx:
+            response_content = response_content[json_start_idx:json_end_idx]
+        
+        # JSON 파싱 (강화된 오류 처리)
+        try:
+            result = json.loads(response_content)
+        except json.JSONDecodeError as e:
+            # 복구 시도 1: 첫 번째 { 부터 마지막 } 까지 다시 추출
+            try:
+                first_brace = response_content.find('{')
+                last_brace = response_content.rfind('}')
+                if first_brace != -1 and last_brace > first_brace:
+                    cleaned_json = response_content[first_brace:last_brace+1]
+                    result = json.loads(cleaned_json)
+                else:
+                    raise ValueError(f"JSON 파싱 오류: {str(e)}\n응답 내용: {response_content[:500]}")
+            except:
+                # 복구 시도 2: 불완전한 JSON 복구
+                try:
+                    json_part = response_content[response_content.find('{'):]
+                    # 닫히지 않은 문자열/배열/객체 닫기
+                    open_braces = json_part.count('{')
+                    close_braces = json_part.count('}')
+                    open_brackets = json_part.count('[')
+                    close_brackets = json_part.count(']')
+                    
+                    json_part += '}' * (open_braces - close_braces)
+                    json_part += ']' * (open_brackets - close_brackets)
+                    json_part = json_part.rstrip().rstrip(',')
+                    if not json_part.endswith('}'):
+                        json_part += '}'
+                    
+                    result = json.loads(json_part)
+                except:
+                    # 모든 복구 시도 실패
+                    raise ValueError(f"JSON 파싱 오류: {str(e)}\n응답 내용: {response_content[:500]}\n\nLLM이 JSON 형식으로 응답하지 않았습니다. 작업을 거부했거나 다른 형식으로 응답한 것 같습니다.")
         # 
         # # 선택된 장소만 필터링
         selected_places = [places[i] for i in result["selected_places"]]
@@ -248,8 +332,6 @@ class CourseCreationTool(BaseTool):
             "reasoning": result["reasoning"]
         }
     
-    from typing import List, Dict, Any
-
     def _format_places_for_prompt(self, places: List[Dict[str, Any]]) -> str:
         """
         프롬프트용 장소 정보 포맷팅

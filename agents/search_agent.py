@@ -61,11 +61,12 @@ class SearchAgent(BaseAgent):
         all_raw_data = []
         for res in search_results:
             if res["success"]:
-                # 제목, 본문, URL을 한 객체로 묶어서 전달
+                # 제목, 본문, URL을 한 객체로 묶어서 전달 (길이 제한 적용)
                 for p in res["places"]:
                     all_raw_data.append({
-                        "url": p['source_url'],
-                        "text": f"제목: {p['name']}, 본문: {p['description']}"
+                        "url": p["source_url"],
+                        "title": self._shrink_text(p.get("name", ""), 120),
+                        "snippet": self._shrink_text(p.get("description", ""), 900),
                     })
                 
         # 데이터 순서를 섞어서 특정 카테고리 쏠림 방지
@@ -129,7 +130,8 @@ class SearchAgent(BaseAgent):
                 original_desc = ""
                 for raw in all_raw_data:
                     if raw['url'] == item.get('source_url'):
-                        original_desc = raw['text']
+                        # title과 snippet을 조합하여 원본 텍스트 재구성
+                        original_desc = f"{raw.get('title', '')} {raw.get('snippet', '')}".strip()
                         break
  
                 # [V3 업그레이드] 언급 횟수(Mentions)를 점수 계산기에 전달
@@ -145,7 +147,7 @@ class SearchAgent(BaseAgent):
                 encoded_name = g_name.replace(" ", "+")
                 map_url = f"https://www.google.com/maps/search/?api=1&query={encoded_name}+{location.replace(' ', '+')}"
 
-                print(f"   - [Keep] {google_info['name']} (평점: {google_info['rating']})")
+                #print(f"   - [Keep] {google_info['name']} (평점: {google_info['rating']})")
                 
                 place_obj = {
                     "name": g_name,
@@ -226,12 +228,48 @@ class SearchAgent(BaseAgent):
     async def _extract_place_entities_with_source(self, raw_data: List[Dict], location: str) -> List[Dict]:
         """
         [범용 고도화] 어떤 테마에서도 60개 데이터를 샅샅이 뒤져 최대한 많은 장소를 발굴함.
+        배치 처리로 토큰 제한 문제 해결.
         """
         if not raw_data: return []
-
+        
+        # 배치 크기 설정 (토큰 제한 고려: gpt-4o-mini는 8192 토큰 제한이므로 6-8개씩 처리)
+        BATCH_SIZE = 6
+        all_results = []
+        
+        # 데이터를 배치로 나누기
+        batches = [raw_data[i:i + BATCH_SIZE] for i in range(0, len(raw_data), BATCH_SIZE)]
+        total_batches = len(batches)
+        
+        print(f"   📦 총 {len(raw_data)}개 데이터를 {total_batches}개 배치로 나눠 처리합니다...")
+        
+        # 각 배치를 순차적으로 처리
+        for batch_idx, batch_data in enumerate(batches, 1):
+            print(f"   🔄 배치 {batch_idx}/{total_batches} 처리 중... ({len(batch_data)}개 데이터)")
+            
+            try:
+                batch_results = await self._process_batch(batch_data, location, batch_idx, total_batches)
+                if batch_results:
+                    all_results.extend(batch_results)
+            except Exception as e:
+                print(f"   ⚠️  배치 {batch_idx} 처리 중 오류: {e}")
+                continue
+        
+        # 중복 제거 (같은 장소명, 같은 URL)
+        unique_results = []
+        seen = set()
+        for item in all_results:
+            key = (item.get('name', ''), item.get('source_url', ''))
+            if key not in seen and key[0]:  # 이름이 있는 경우만
+                seen.add(key)
+                unique_results.append(item)
+        
+        return unique_results
+    
+    async def _process_batch(self, batch_data: List[Dict], location: str, batch_num: int, total_batches: int) -> List[Dict]:
+        """배치 데이터 처리"""
         prompt = f"""
         당신은 방대한 웹 데이터를 분석하여 가치 있는 장소 정보만 골라내는 '여행 정보 마이닝 전문가'입니다. 
-        제공된 {len(raw_data)}개의 검색 결과에서 {location} 지역의 진짜 '장소명'을 추출하고 분류하세요.
+        제공된 {len(batch_data)}개의 검색 결과(배치 {batch_num}/{total_batches})에서 {location} 지역의 진짜 '장소명'을 추출하고 분류하세요.
 
         [임무 1: 데이터 정제 및 중복 제거 (필수)]
         - 동일한 장소가 여러 검색 결과에 나타날 경우, 가장 정보가 알찬 하나의 결과로 통합하세요.
@@ -254,14 +292,22 @@ class SearchAgent(BaseAgent):
         - 출처: 해당 장소가 언급된 데이터의 'url' 필드 값을 정확히 매칭하세요.
 
         [임무 4: 전수 조사 명령 (중요)]
-        - 제공된 60개의 데이터를 절대로 대충 훑지 마세요. 
-        - 각 본문 텍스트를 끝까지 읽고 숨겨진 장소명을 모두 찾아내어 **결과 리스트를 최대한 길게(30개 이상 목표)** 만드세요.
+        - 제공된 데이터를 절대로 대충 훑지 마세요. 
+        - 각 본문 텍스트를 끝까지 읽고 숨겨진 장소명을 모두 찾아내세요.
         - 결과가 많아도 좋으니 누락되는 장소가 없게 하는 것이 최우선입니다.
 
         [분석할 데이터]
-        {raw_data}
+        각 데이터는 다음 형식입니다:
+        - url: 출처 URL
+        - title: 제목 (최대 120자)
+        - snippet: 본문 요약 (최대 900자)
+        
+        {batch_data}
 
-        [응답 형식 (JSON 고정)]
+        [응답 형식]
+        **반드시 다음의 JSON 형식만** 출력하세요. 다른 설명이나 텍스트는 포함하지 마세요.
+        
+        ```json
         {{
           "results": [
             {{
@@ -271,19 +317,199 @@ class SearchAgent(BaseAgent):
             }}
           ]
         }}
+        ```
+        
+        **중요: JSON 형식만 출력하고, 다른 텍스트는 포함하지 마세요.**
         """
+        
         try:
             response = await self.client.chat.completions.create(
                 model=self.llm_model,
                 messages=[{"role": "system", "content": "You are a professional travel data miner who never skips info. Output only JSON."},
                           {"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
+                max_tokens=1500,  # 장소명 리스트 추출에는 1500 토큰으로 충분 (입력 토큰 여유 확보)
+                temperature=0.3  # 일관된 JSON 형식 유지
             )
-            data = json.loads(response.choices[0].message.content)
-            return data.get("results", [])
+            
+            # 응답에서 JSON 추출
+            response_content = response.choices[0].message.content.strip()
+            
+            # JSON 부분만 추출 (마크다운 코드 블록 제거)
+            if "```json" in response_content:
+                json_start = response_content.find("```json") + 7
+                json_end = response_content.find("```", json_start)
+                if json_end == -1:
+                    json_end = len(response_content)
+                response_content = response_content[json_start:json_end].strip()
+            elif "```" in response_content:
+                json_start = response_content.find("```") + 3
+                json_end = response_content.find("```", json_start)
+                if json_end == -1:
+                    json_end = len(response_content)
+                response_content = response_content[json_start:json_end].strip()
+            
+            # JSON 객체 시작/끝 찾기 (중괄호 기준)
+            json_start_idx = response_content.find("{")
+            json_end_idx = response_content.rfind("}") + 1
+            if json_start_idx != -1 and json_end_idx > json_start_idx:
+                response_content = response_content[json_start_idx:json_end_idx]
+            
+            # JSON 파싱 (더 강력한 오류 처리)
+            try:
+                data = json.loads(response_content)
+                results = data.get("results", [])
+                print(f"      ✅ 배치 {batch_num}에서 {len(results)}개 장소 추출 완료")
+                return results
+            except json.JSONDecodeError as e:
+                # JSON 파싱 오류 시 응답 내용에서 JSON 부분을 더 적극적으로 찾기
+                print(f"      ⚠️  배치 {batch_num} JSON 파싱 오류 시도 중... (오류: {str(e)[:100]})")
+                
+                # 방법 1: 첫 번째 { 부터 마지막 } 까지 다시 추출
+                try:
+                    first_brace = response_content.find('{')
+                    last_brace = response_content.rfind('}')
+                    if first_brace != -1 and last_brace > first_brace:
+                        cleaned_json = response_content[first_brace:last_brace+1]
+                        data = json.loads(cleaned_json)
+                        results = data.get("results", [])
+                        print(f"      ✅ 배치 {batch_num} 복구 성공 (방법1): {len(results)}개 장소 추출")
+                        return results
+                except Exception as e1:
+                    pass
+                
+                # 방법 2: 불완전한 JSON 복구 시도 (닫히지 않은 문자열/배열 수정)
+                try:
+                    # JSON이 중간에 잘린 경우를 대비해 복구 시도
+                    first_brace = response_content.find('{')
+                    if first_brace != -1:
+                        # "results" 배열이 있는지 확인
+                        if '"results"' in response_content:
+                            # 마지막 완전한 객체까지 찾기
+                            json_part = response_content[first_brace:]
+                            
+                            # 닫히지 않은 문자열 닫기
+                            if json_part.count('"') % 2 != 0:
+                                json_part += '"'
+                            
+                            # 닫히지 않은 배열/객체 닫기
+                            open_braces = json_part.count('{')
+                            close_braces = json_part.count('}')
+                            open_brackets = json_part.count('[')
+                            close_brackets = json_part.count(']')
+                            
+                            # 부족한 닫는 괄호 추가
+                            json_part += '}' * (open_braces - close_braces)
+                            json_part += ']' * (open_brackets - close_brackets)
+                            
+                            # 마지막 쉼표 제거 (잘못된 JSON 형식 방지)
+                            json_part = json_part.rstrip().rstrip(',')
+                            if not json_part.endswith('}'):
+                                json_part += '}'
+                            
+                            data = json.loads(json_part)
+                            results = data.get("results", [])
+                            if results:
+                                print(f"      ✅ 배치 {batch_num} 복구 성공 (방법2): {len(results)}개 장소 추출")
+                                return results
+                except Exception as e2:
+                    pass
+                
+                # 방법 3: 정규식으로 JSON 객체 추출 시도
+                try:
+                    import re
+                    # "results" 배열 내의 객체들만 추출
+                    pattern = r'\{[^{}]*"name"\s*:\s*"[^"]*"[^{}]*"category"\s*:\s*"[^"]*"[^{}]*"source_url"\s*:\s*"[^"]*"[^{}]*\}'
+                    matches = re.findall(pattern, response_content, re.DOTALL)
+                    if matches:
+                        results = []
+                        for match in matches:
+                            try:
+                                obj = json.loads(match)
+                                if "name" in obj and "category" in obj:
+                                    results.append(obj)
+                            except:
+                                continue
+                        if results:
+                            print(f"      ✅ 배치 {batch_num} 복구 성공 (방법3): {len(results)}개 장소 추출")
+                            return results
+                except Exception as e3:
+                    pass
+                
+                # 모든 복구 시도 실패
+                print(f"      ❌ 배치 {batch_num} JSON 파싱 실패 (응답 길이: {len(response_content)}, 일부: {response_content[:300]})")
+                # 디버깅을 위해 전체 응답 저장 (선택사항)
+                if len(response_content) < 2000:  # 너무 길지 않으면 전체 출력
+                    print(f"      📋 전체 응답: {response_content}")
+                return []
+                
         except Exception as e:
-            print(f"❌ 엔티티 추출 에러: {e}")
-            return []  
+            error_msg = str(e)
+            
+            # 컨텍스트 길이 초과 오류 처리
+            if "context length" in error_msg.lower() or "8192" in error_msg or "maximum context" in error_msg.lower():
+                print(f"      ⚠️  배치 {batch_num} 컨텍스트 길이 초과. 배치 크기를 줄여 재시도...")
+                # 배치를 더 작게 나누어 재시도
+                if len(batch_data) > 3:
+                    mid = len(batch_data) // 2
+                    first_half = batch_data[:mid]
+                    second_half = batch_data[mid:]
+                    
+                    results = []
+                    if first_half:
+                        sub_results = await self._process_batch(first_half, location, batch_num * 100, total_batches)
+                        results.extend(sub_results)
+                    if second_half:
+                        sub_results = await self._process_batch(second_half, location, batch_num * 100 + 1, total_batches)
+                        results.extend(sub_results)
+                    return results
+                else:
+                    print(f"      ⚠️  배치 {batch_num}가 너무 작아도 실패. 건너뜁니다.")
+                    return []
+            
+            # Rate limit 오류 처리
+            elif "rate_limit" in error_msg.lower() or "429" in error_msg:
+                print(f"      ⚠️  배치 {batch_num} 처리 중 토큰 제한 초과. 잠시 대기 후 재시도...")
+                import asyncio
+                await asyncio.sleep(3)  # 3초 대기
+                # 재시도
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.llm_model,
+                        messages=[{"role": "system", "content": "You are a professional travel data miner who never skips info. Output only JSON."},
+                                  {"role": "user", "content": prompt}],
+                        max_tokens=1500,
+                        temperature=0.3
+                    )
+                    response_content = response.choices[0].message.content.strip()
+                    
+                    if "```json" in response_content:
+                        json_start = response_content.find("```json") + 7
+                        json_end = response_content.find("```", json_start)
+                        if json_end == -1:
+                            json_end = len(response_content)
+                        response_content = response_content[json_start:json_end].strip()
+                    elif "```" in response_content:
+                        json_start = response_content.find("```") + 3
+                        json_end = response_content.find("```", json_start)
+                        if json_end == -1:
+                            json_end = len(response_content)
+                        response_content = response_content[json_start:json_end].strip()
+                    
+                    json_start_idx = response_content.find("{")
+                    json_end_idx = response_content.rfind("}") + 1
+                    if json_start_idx != -1 and json_end_idx > json_start_idx:
+                        response_content = response_content[json_start_idx:json_end_idx]
+                    
+                    data = json.loads(response_content)
+                    results = data.get("results", [])
+                    print(f"      ✅ 배치 {batch_num} 재시도 성공: {len(results)}개 장소 추출")
+                    return results
+                except Exception as retry_e:
+                    print(f"      ⚠️  배치 {batch_num} 재시도 실패: {str(retry_e)[:100]}")
+                    return []
+            else:
+                print(f"      ⚠️  배치 {batch_num} 처리 중 오류: {error_msg[:150]}")
+                return []  
 
     #(예: 대화 중심, 활동 중심, 휴식 중심)
     #(예: 조용한 카페, 실내 전시장, 분위기 있는 식당)
@@ -310,7 +536,10 @@ class SearchAgent(BaseAgent):
         3. 각 단계별로 Tavily 검색을 위한 '최적화된 검색 쿼리'와 그 쿼리를 선정한 '판단 근거(reasoning)'를 생성하세요.
            (팁: '추천', '리스트', '리뷰', '베스트' 같은 단어를 섞어야 구체적인 가게 이름이 잘 나옵니다.)
 
-        [응답 형식 (JSON 고정)]
+        [응답 형식]
+        **반드시 다음의 JSON 형식만** 출력하세요. 다른 설명이나 텍스트는 포함하지 마세요.
+        
+        ```json
         {{
           "action_analysis": "행동 타입 분석 요약",
           "course_structure": [
@@ -334,14 +563,44 @@ class SearchAgent(BaseAgent):
             }}
           ]
         }}
+        ```
+        
+        **중요: JSON 형식만 출력하고, 다른 텍스트는 포함하지 마세요.**
         """
         try:
             response = await self.client.chat.completions.create(
                 model=self.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
+                messages=[{"role": "user", "content": prompt}]
             )
-            return json.loads(response.choices[0].message.content)
+            
+            # 응답에서 JSON 추출
+            response_content = response.choices[0].message.content.strip()
+            
+            # JSON 부분만 추출 (마크다운 코드 블록 제거)
+            if "```json" in response_content:
+                json_start = response_content.find("```json") + 7
+                json_end = response_content.find("```", json_start)
+                if json_end == -1:
+                    json_end = len(response_content)
+                response_content = response_content[json_start:json_end].strip()
+            elif "```" in response_content:
+                json_start = response_content.find("```") + 3
+                json_end = response_content.find("```", json_start)
+                if json_end == -1:
+                    json_end = len(response_content)
+                response_content = response_content[json_start:json_end].strip()
+            
+            # JSON 객체 시작/끝 찾기 (중괄호 기준)
+            json_start_idx = response_content.find("{")
+            json_end_idx = response_content.rfind("}") + 1
+            if json_start_idx != -1 and json_end_idx > json_start_idx:
+                response_content = response_content[json_start_idx:json_end_idx]
+            
+            # JSON 파싱
+            try:
+                return json.loads(response_content)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"JSON 파싱 오류: {str(e)}\n응답 내용: {response_content[:500]}")
 
         except Exception as e:
             print(f"⚠️ LLM 호출 실패(쿼터 초과 등): {e}")
@@ -366,6 +625,20 @@ class SearchAgent(BaseAgent):
                     }
                 ]
             }
+
+    def _shrink_text(self, text: str, limit: int = 900) -> str:
+        """
+        본문 폭주 방지: 공백 정리 + 길이 제한
+        Tavily에서 받은 긴 description을 토큰 예산 내로 제한
+        """
+        if not text:
+            return ""
+        # 연속 공백을 하나로 정리
+        text = " ".join(text.split())
+        # 길이 제한
+        if len(text) > limit:
+            return text[:limit] + "…"
+        return text
 
     ## 한번 추가해보는 청소기
     def _clean_place_name(self, raw_name: str) -> str:
@@ -402,7 +675,7 @@ class SearchAgent(BaseAgent):
             search_name = self._clean_place_name(name)
             query = f"{location} {search_name}"
             
-            print(f"   🔎 구글 검색 시도: '{query}'") # 어떤 키워드로 구글에 물어보는지 확인용
+            #print(f"   🔎 구글 검색 시도: '{query}'") # 어떤 키워드로 구글에 물어보는지 확인용
             
             res = self.gmaps.places(query=query)
             if res.get('results'):

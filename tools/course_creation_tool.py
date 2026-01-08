@@ -3,6 +3,8 @@
 검색된 장소들을 바탕으로 최적의 코스를 생성합니다.
 """
 
+import json
+import openai
 from typing import Any, Dict, List, Optional
 from .base_tool import BaseTool
 
@@ -22,9 +24,9 @@ class CourseCreationTool(BaseTool):
         )
         
         # LLM 설정
-        self.llm_model = self.config.get("llm_model", "gpt-4")
+        self.llm_model = self.config.get("llm_model", "gpt-4o-mini")
         self.api_key = self.config.get("api_key") or self.config.get("openai_api_key")
-        
+        self.client = openai.AsyncOpenAI()
         # LLM 클라이언트 초기화 (실제 구현 시 사용)
         # 예: OpenAI, Anthropic, 등
         # self.client = OpenAI(api_key=self.api_key)
@@ -171,88 +173,125 @@ class CourseCreationTool(BaseTool):
         Returns:
             코스 생성 결과
         """
-        # TODO: LLM 프롬프트 구성 및 호출 구현
+
+        prompt = f"""
+        # Role
+        당신은 현지 지리에 능통하고 모든 장소를 방문해본 여행 가이드입니다. 당신은 효율적인 경로 설계에 능통합니다.
+        
+        # Context
+        사용자의 선호 조건과 제공된 장소 데이터를 바탕으로 최적의 여행 코스를 설계합니다.
+        
+        # Input Data
+        - 장소 리스트 : {self._format_places_for_prompt(places)}
+        - 사용자 선호 조건{{
+            "theme": {user_preferences['theme']},
+            "group_size": {user_preferences['group_size']},
+            "visit_date": {user_preferences['visit_date']},
+            "visit_time": {user_preferences['visit_time']},
+            "transportation": {user_preferences['transportation']}
+        }}
+
+        # Constraints
+        1. 각 코스 간 이동 거리는 30분 이내일 것.
+        2. 도보 외의 교통 수단의 사용 빈도를 최소화할 것. 단, 환승은 사용 빈도 계산에서 제외한다. 도보와 교통 수단의 이동 시간 차이가 20분 이내이면 도보를 선택한다.
+        3. 이전에 방문한 장소를 다시 지나지 않을 것.
+        4. 장소에 현재 인원이 모두 수용 가능할 것.
+        5. 장소가 방문 일자에 운영중임을 확인할 것. 입력된 정보가 없을 시 보수적으로 판단한다.
+        6. 음식점, 카페 등을 코스 중간마다 배치할 것.
+
+        # Task Workflow
+        1. 사용자의 테마와 장소의 특징을 대조하여 적합한 장소들을 선정합니다.
+        2. 이동 거리를 최소화하는 순서로 배열합니다.
+        3. 선정된 순서가 실제 방문 가능 시간(영업시간) 내에 있는지 검증합니다.
+        4. 모든 논리적 검증이 끝나면 최종 JSON을 출력합니다.
+
+        ---
+
+        ## Return Value
+        코스 설계 완료 후, 다음의 JSON 파일 형식으로 답변을 완성하세요.
+        {{
+            "selected_places": [장소 인덱스 리스트],
+            "sequence": [방문 순서],
+            "estimated_duration": {{장소별 체류 시간 (분)}},
+            "course_description": "코스 설명",
+            "reasoning": "선정 이유"
+        }}
+
+        ### OUTPUT Rules
+        "course_description" 에는 방문하는 각각의 장소에 대한 간단한 설명들을 첨부합니다.
+        "reasoning" 에는 인덱스를 **장소이름(인덱스)** 형태로 언급하고, 인덱스에 해당하는 장소에 대한 설명을 바탕으로 사용자 선호 조건 중 만족시킨 사항들을 설명합니다.
+        "reasoning" 을 생성할 때, 방문하는 장소들의 순서 및 이동수단 설계 과정에 대해 설명하세요.
+        설명 예시:
+        - 장소 A와 장소 C 사이에 장소 B가 있고, 다시 장소 A 주변 지역을 가지 않을 예정이기에 A-B-C 순서로 일정을 설계하였습니다.
+        - 방문 기간이 오후이기 때문에, 잠시 쉬어가기 위해 장소 A와 장소 C 사이에 **카페** B를 먼저 방문합니다.
+        - 장소 A와 장소 B 사이에 오르막길이 길게 있고 도보 시간이 15분 이상 걸리기 때문에, 이동수단으로 **버스**를 선택했습니다.
+        """
+
+        response = await self.client.chat.completions.create(
+            model=self.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
         # 
-        # 프롬프트 예시:
-        # prompt = f"""
-        # 다음 장소들 중에서 사용자의 선호도에 맞는 최적의 코스를 제안해주세요.
-        # 
-        # 사용자 선호도:
-        # - 테마: {user_preferences['theme']}
-        # - 인원: {user_preferences['group_size']}명
-        # - 방문 일자: {user_preferences['visit_date']}
-        # - 이동 수단: {user_preferences['transportation']}
-        # 
-        # 장소 리스트:
-        # {self._format_places_for_prompt(places)}
-        # 
-        # 다음을 고려하여 코스를 생성해주세요:
-        # 1. 테마에 맞는 장소 선택
-        # 2. 식사-활동-카페 등의 자연스러운 순서
-        # 3. 시간대 고려 (점심, 저녁 등)
-        # 4. 인원수에 적합한 장소
-        # 
-        # JSON 형식으로 응답해주세요:
-        # {{
-        #   "selected_places": [장소 인덱스 리스트],
-        #   "sequence": [방문 순서],
-        #   "estimated_duration": {{장소별 체류 시간 (분)}},
-        #   "course_description": "코스 설명",
-        #   "reasoning": "선정 이유"
-        # }}
-        # """
-        # 
-        # response = await self.client.chat.completions.create(
-        #     model=self.llm_model,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     response_format={"type": "json_object"}
-        # )
-        # 
-        # result = json.loads(response.choices[0].message.content)
+        result = json.loads(response.choices[0].message.content)
         # 
         # # 선택된 장소만 필터링
-        # selected_places = [places[i] for i in result["selected_places"]]
+        selected_places = [places[i] for i in result["selected_places"]]
         # 
-        # return {
-        #     "course": {
-        #         "places": selected_places,
-        #         "sequence": result["sequence"],
-        #         "estimated_duration": result["estimated_duration"],
-        #         "course_description": result["course_description"]
-        #     },
-        #     "reasoning": result["reasoning"]
-        # }
-        
-        # 임시 반환 구조
         return {
             "course": {
-                "places": places[:3],  # 임시로 처음 3개 선택
-                "sequence": [0, 1, 2],
-                "estimated_duration": {0: 120, 1: 60, 2: 90},
-                "course_description": "임시 코스 설명"
+                "places": selected_places,
+                "sequence": result["sequence"],
+                "estimated_duration": result["estimated_duration"],
+                "course_description": result["course_description"]
             },
-            "reasoning": "임시 선정 이유"
+            "reasoning": result["reasoning"]
         }
     
+    from typing import List, Dict, Any
+
     def _format_places_for_prompt(self, places: List[Dict[str, Any]]) -> str:
         """
         프롬프트용 장소 정보 포맷팅
         
         Args:
-            places: 장소 리스트
+            places: 장소 리스트 (name, category, rating, trust_score, address, source_url, map_url 포함)
             
         Returns:
             포맷팅된 문자열
         """
         formatted = []
-        for i, place in enumerate(places):
+        for i, place in enumerate(places, 1):
+            # 필수 정보: 이름 및 카테고리
             info = f"[{i}] {place.get('name', 'Unknown')}"
             if place.get('category'):
                 info += f" ({place['category']})"
+            
+            # 점수 정보 (평점 및 신뢰도)
+            scores = []
             if place.get('rating'):
-                info += f" - 평점: {place['rating']}"
-            if place.get('description'):
-                info += f"\n  설명: {place['description']}"
+                scores.append(f"평점: {place['rating']}")
+            if place.get('trust_score'):
+                scores.append(f"신뢰도: {place['trust_score']}")
+            
+            if scores:
+                info += f" - {' / '.join(scores)}"
+                
+            # 주소 정보
+            if place.get('address'):
+                info += f"\n   주소: {place['address']}"
+                
+            # 링크 정보 (출처 및 지도)
+            links = []
+            if place.get('source_url'):
+                links.append(f"추천 근거: {place['source_url']}")
+            if place.get('map_url'):
+                links.append(f"지도: {place['map_url']}")
+                
+            if links:
+                info += f"\n   링크: {' | '.join(links)}"
+                
             formatted.append(info)
-        return "\n".join(formatted)
+            
+        return "\n\n".join(formatted)
 

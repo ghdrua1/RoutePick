@@ -4,19 +4,21 @@
 """
 
 import os
+from dotenv import load_dotenv
 from typing import Dict, Any
 
 
 class Config:
     """전역 설정 클래스"""
     
+    load_dotenv()
     # API Keys
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
     GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    
+
     # LLM 설정
-    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4")
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
     
     # 검색 설정
     DEFAULT_MAX_RESULTS = int(os.getenv("DEFAULT_MAX_RESULTS", "20"))

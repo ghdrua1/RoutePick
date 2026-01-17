@@ -92,7 +92,8 @@ class SearchAgent(BaseAgent):
 
         # 4. Google Maps 기반 검증 (병렬 처리로 속도 최적화)
         print(f"🔍 [Step 3-3] Google Places API로 장소 검증 중... ({len(refined_data)}개)")
-
+        print("-" * 60) # 디버깅 구분선
+        
         async def process_place_item(agent_self, item):
             place_name = item.get('name')
             clean_name = agent_self._clean_place_name(place_name)
@@ -105,27 +106,46 @@ class SearchAgent(BaseAgent):
         # [수정] 필터링 로직을 검증 루프 밖으로 빼서 가독성 향상
         all_valid_places = []
         for item, google_info in place_results:
-            if not google_info: continue
+            # --- [디버깅 로그] ---
+            place_name_for_log = item.get('name', '이름 없음')
+            print(f"\n[검증 시작] '{place_name_for_log}'")
 
-            # 1. 지역 필터링
-            if target_city or target_gu: # 구조적 비교 가능 시
-                if not self._is_in_target_area(google_info.get('address_components', []), target_city, target_gu):
-                    continue
-            else: # Fallback: 기존 문자열 비교
-                if not self._is_location_match_fallback(google_info.get('address',''), location):
-                    continue
+            if not google_info:
+                print(f"  [탈락 ❌] 이유: Google Maps 정보 없음")
+                continue
             
+            print(f"  [정보 확인 ✅] 구글 이름: '{google_info.get('name')}', 주소: {google_info.get('address')}")
+            
+            # 1. 지역 필터링
+            if target_city or target_gu:
+                is_local = self._is_in_target_area(google_info.get('address_components', []), target_city, target_gu)
+                if not is_local:
+                    print(f"  [탈락 ❌] 이유: 지역 불일치 (요청 지역: '{location}')")
+                    continue
+            else:
+                if not self._is_location_match_fallback(google_info.get('address',''), location):
+                    print(f"  [탈락 ❌] 이유: 지역 불일치 (Fallback)")
+                    continue
+            print(f"  [지역 통과 ✅]")
+
             # 2. 카테고리 보정
             initial_category = item.get('category', '기타')
             corrected_category = self._correct_category(google_info.get('types', []), initial_category)
+            if initial_category != corrected_category:
+                print(f"  [카테고리 보정] {initial_category} -> {corrected_category}")
 
             # 3. 품질 필터링
             g_rating = google_info.get('rating', 0.0)
-            if 0.1 <= g_rating < 3.5: 
-                print(f"   - [Hard Cut] {google_info['name']}: 평점 {g_rating} (품질 미달)")
+            if 0.1 <= g_rating < 3.5:
+                print(f"  [탈락 ❌] 이유: 낮은 평점 ({g_rating})")
                 continue
 
-            if corrected_category in ['식당', '카페'] and g_rating < 4.0: continue
+            if corrected_category in ['식당', '카페'] and g_rating < 4.0:
+                print(f"  [탈락 ❌] 이유: 카테고리별 평점 미달 (카테고리: {corrected_category}, 평점: {g_rating})")
+                continue
+            
+            print(f"  [최종 통과 ✅] 모든 필터를 통과했습니다.")
+
 
             # 모든 필터 통과 시, 최종 객체 생성
             place_obj = {
@@ -133,7 +153,7 @@ class SearchAgent(BaseAgent):
                 "category": corrected_category, "place_name": item.get('name')
             }
             all_valid_places.append(place_obj)
-
+        print("-" * 60) # 디버깅 구분선
         # ============================================================
         # [수정] 최종 후보군 생성 (라운드 로빈 -> 품질 기반 선별)
         # ============================================================

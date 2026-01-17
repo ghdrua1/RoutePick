@@ -38,14 +38,10 @@ class SearchAgent(BaseAgent):
         theme = input_data.get("theme")
         location = input_data.get("location")
         
-        # [수정] 사용자 요청 지역의 행정구역 정보 미리 분석
-        print(f"\n📍 [Step 1-1] 사용자 요청 지역 분석: '{location}'")
-        target_city, target_gu = self._get_target_admin_areas(location)
-        if not target_city and not target_gu:
-            print(f"   ⚠️ '{location}' 지역 분석 실패. 기존 문자열 비교 방식으로 검증합니다.")
-        else:
-            print(f"   - 분석 결과: City='{target_city or 'N/A'}', Gu='{target_gu or 'N/A'}'")
-     
+        # [최종 수정] 키워드 확장 함수 호출
+        print(f"\n📍 [Step 1-1] 사용자 요청 지역 키워드 분석: '{location}'")
+        location_keywords = self._get_target_admin_areas(location)
+
         # 전략 수립 (행동 분석 및 카테고리 설계)
         print(f"\n🧠 [Step 1-2] 테마 분석 및 코스 설계 중...")
         
@@ -105,34 +101,52 @@ class SearchAgent(BaseAgent):
         # [수정] 필터링 로직을 검증 루프 밖으로 빼서 가독성 향상
         all_valid_places = []
         for item, google_info in place_results:
-            if not google_info: continue
+            # --- [디버깅 로그 1] ---
+            place_name_for_log = item.get('name', '이름 없음')
+            print(f"\n[검증 시작] '{place_name_for_log}'")
 
-            # 1. 지역 필터링
-            if target_city or target_gu: # 구조적 비교 가능 시
-                if not self._is_in_target_area(google_info.get('address_components', []), target_city, target_gu):
-                    continue
-            else: # Fallback: 기존 문자열 비교
-                if not self._is_location_match_fallback(google_info.get('address',''), location):
-                    continue
+            if not google_info:
+                # --- [디버깅 로그 2] ---
+                print(f"  [탈락 ❌] 이유: Google Maps 정보 없음")
+                continue
+
+            # --- [디버깅 로그 3] ---
+            print(f"  [정보 확인 ✅] 구글 이름: '{google_info.get('name')}', 주소: {google_info.get('address')}")
+
+            # [최종 수정] 함수 이름 변경 및 호출 방식 통일
+            if not self._is_in_location(google_info.get('address', ''), location_keywords):
+                print(f"  [탈락 ❌] 이유: 지역 불일치 (요청 지역: '{location}')")
+                continue
+            
+            print(f"  [지역 통과 ✅]")
+
             
             # 2. 카테고리 보정
             initial_category = item.get('category', '기타')
             corrected_category = self._correct_category(google_info.get('types', []), initial_category)
+            if initial_category != corrected_category:
+                print(f"  [카테고리 보정] {initial_category} -> {corrected_category}")
 
             # 3. 품질 필터링
             g_rating = google_info.get('rating', 0.0)
-            if 0.1 <= g_rating < 3.5: 
-                print(f"   - [Hard Cut] {google_info['name']}: 평점 {g_rating} (품질 미달)")
+            if 0.1 <= g_rating < 3.5:
+                # --- [디버깅 로그 6] ---
+                print(f"  [탈락 ❌] 이유: 낮은 평점 ({g_rating})")
                 continue
-
-            if corrected_category in ['식당', '카페'] and g_rating < 4.0: continue
-
+            if corrected_category in ['식당', '카페'] and g_rating < 4.0:
+                # --- [디버깅 로그 7] ---
+                print(f"  [탈락 ❌] 이유: 카테고리별 평점 미달 (카테고리: {corrected_category}, 평점: {g_rating})")
+                continue
+            print(f"  [최종 통과 ✅] 모든 필터를 통과했습니다.")
+          
             # 모든 필터 통과 시, 최종 객체 생성
             place_obj = {
                 "google_info": google_info, "item": item,
                 "category": corrected_category, "place_name": item.get('name')
             }
             all_valid_places.append(place_obj)
+        
+        print("-" * 60) # 디버깅 구분선             
 
         # ============================================================
         # [수정] 최종 후보군 생성 (라운드 로빈 -> 품질 기반 선별)
@@ -639,7 +653,7 @@ class SearchAgent(BaseAgent):
     
     def _get_google_data(self, name: str, location: str) -> Optional[Dict]:
         """Google Places API 검증 - 기존 코드 기반에 address_components, types, geometry 추가"""
-        
+
         try:
             search_name = self._clean_place_name(name)
             query = f"{location} {search_name}"
@@ -707,41 +721,68 @@ class SearchAgent(BaseAgent):
         except Exception as e:
             print(f"      ⚠️ 구글 API 에러: {e}")
             return None
-    
-    # [신규] 지역 분석 및 검증을 위한 헬퍼 메소드들
-    def _get_target_admin_areas(self, location_name: str) -> Tuple[str, str]:
-        """사용자가 입력한 지역명의 시/도 및 구/군 정보를 반환합니다."""
+
+
+    # [최종 수정] 이 함수를 아래 내용으로 교체
+    def _get_target_admin_areas(self, location_name: str) -> List[str]:
+        """
+        사용자가 입력한 지역의 가장 구체적인 행정구역(시/군/구) 키워드를 추출합니다.
+        """
         try:
             geocode_result = self.gmaps.geocode(location_name)
-            if not geocode_result: return "", ""
-            city, gu = "", ""
-            for component in geocode_result[0]['address_components']:
-                types = component['types']
-                if 'administrative_area_level_1' in types: city = component['long_name']
-                if 'locality' in types or 'sublocality_level_1' in types:
-                    if not gu: gu = component['long_name']
-            return city, gu
+            if not geocode_result:
+                # API 실패 시, 원래 입력값만 사용
+                print(f"   ⚠️ Geocoding 실패. 기본 키워드 '{location_name}'만 사용합니다.")
+                return [location_name]
+
+            # 가장 구체적인 '시/군/구' 레벨의 이름을 찾음
+            # 우선순위: sublocality_level_1 (구) > locality (시)
+            target_area = ""
+            components = geocode_result[0]['address_components']
+            
+            for component in components:
+                if 'sublocality_level_1' in component['types']:
+                    target_area = component['long_name']
+                    break # '구'를 찾으면 바로 종료
+            
+            if not target_area:
+                for component in components:
+                    if 'locality' in component['types']:
+                        target_area = component['long_name']
+                        break # '시'를 찾으면 바로 종료
+            
+            # 만약 '시/구'를 못 찾으면, 원래 입력값을 그대로 사용
+            if not target_area:
+                print(f"   ⚠️ 구체적인 시/군/구 분석 실패. 기본 키워드 '{location_name}'만 사용합니다.")
+                return [location_name]
+
+            # 예: 'Gangneung-si' -> ['gangneung-si', 'gangneung', '강릉시', '강릉']
+            # 다양한 표기법을 모두 키워드로 추가
+            keywords = {
+                target_area.lower(),
+                target_area.lower().replace('-si', '').replace('-gu', '').strip()
+            }
+            for comp in components:
+                if comp['long_name'] == target_area:
+                    keywords.add(comp['short_name'].lower())
+                    keywords.add(comp['short_name'].lower().replace('시', '').replace('구', '').strip())
+            
+            final_keywords = [kw for kw in keywords if kw]
+            print(f"   - 최종 지역 키워드: {final_keywords}")
+            return final_keywords
+        
         except Exception:
-            return "", ""
-
-    def _is_in_target_area(self, components: List[Dict], target_city: str, target_gu: str) -> bool:
-        """장소의 주소 구성요소가 타겟 지역에 속하는지 구조적으로 비교합니다."""
-        if not components: return False
-        place_city, place_gu = "", ""
-        for component in components:
-            types = component['types']
-            if 'administrative_area_level_1' in types: place_city = component['long_name']
-            if 'locality' in types or 'sublocality_level_1' in types:
-                if not place_gu: place_gu = component['long_name']
-        if target_city and place_city and target_city != place_city: return False
-        if target_gu and place_gu and target_gu != place_gu: return False
-        return True
-
-    def _is_location_match_fallback(self, address: str, original_location: str) -> bool:
-        """지역 분석 실패 시 사용하는 문자열 기반의 간단한 지역 검증."""
-        if not address: return False
-        return original_location.lower() in address.lower()
-
+            print(f"   ⚠️ 지역 키워드 분석 중 오류 발생. 기본 키워드 '{location_name}'만 사용합니다.")
+            return [location_name]
+    
+    # [최종 수정] 이 함수를 아래 내용으로 교체 (이름만 변경, 로직은 단순화)
+    def _is_in_location(self, address: str, keywords: List[str]) -> bool:
+        """주소 문자열 안에 키워드 중 하나라도 포함되어 있는지 확인합니다."""
+        if not address:
+            return False
+        
+        address_lower = address.lower()
+        return any(kw in address_lower for kw in keywords)
     
     def _calculate_trust_score_v4(self, google_rating: float, google_reviews: int, content: str, category: str, mention_count: int) -> float:
         """

@@ -2,7 +2,7 @@ import json
 import asyncio
 import os
 import random 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 from openai import AsyncOpenAI
 import googlemaps
 from .base_agent import BaseAgent
@@ -47,7 +47,7 @@ class SearchAgent(BaseAgent):
         
 
         # 2. Tavily 멀티 검색 (본문 데이터 확보)
-        print(f"📡 [Step 2] Tavily를 통해 방대한 실시간 데이터 수집 중... (60개 후보 탐색)")
+        print(f"📡 [Step 2] Tavily를 통해 방대한 실시간 데이터 수집 중... ")
 
         # Tavily 검색 결과 수 최적화 (20 -> 15로 줄여서 처리 시간 단축, 정확도 유지)
         tasks = [
@@ -72,17 +72,11 @@ class SearchAgent(BaseAgent):
                 
         # 데이터 순서를 섞어서 특정 카테고리 쏠림 방지
         random.shuffle(all_raw_data) 
-        print(f"📝 [Step 3-2] LLM이 60개 원문 전체를 전수 조사 중...")
-        
-        # [Step 3 수정] 이름과 카테고리를 함께 추출
-        # 수정된 추출 함수 호출
+        print(f"📝 [Step 3-2] LLM이 원문 전체를 전수 조사 중...")
         refined_data = await self._extract_place_entities_with_source(all_raw_data, location)
-
-        #  LLM의 성실도 체크
-        print(f"   ✅ LLM이 60개 데이터에서 발굴한 유니크 장소: {len(refined_data)}개")
+        print(f"   ✅ LLM이 {len(all_raw_data)}개 데이터에서 발굴한 유니크 장소: {len(refined_data)}개")
 
         # 인기도(언급 횟수) 계산
-        # 어떤 장소가 60개 검색 결과 중 여러 번 등장했는지 카운트합니다.
         mention_counts = {}
         for item in refined_data:
             name = item.get('name')
@@ -93,16 +87,14 @@ class SearchAgent(BaseAgent):
         category_buckets = {} # 카테고리별로 장소를 담을 바구니
         seen_names = set() # 중복 제거용
 
-        # 병렬 처리: 모든 Google Places API 호출을 동시에 실행
-        async def process_place_item(item):
+        async def process_place_item(agent_self, item):
             place_name = item.get('name')
             place_category = item.get('category', '기타')
-            clean_name = self._clean_place_name(place_name)
-            google_info = await asyncio.to_thread(self._get_google_data, clean_name, location)
+            clean_name = agent_self._clean_place_name(place_name)
+            google_info = await asyncio.to_thread(agent_self._get_google_data, clean_name, location)
             return item, google_info, place_category
-        
-        # 모든 장소를 병렬로 처리
-        place_tasks = [process_place_item(item) for item in refined_data]
+
+        place_tasks = [process_place_item(self, item) for item in refined_data]
         place_results = await asyncio.gather(*place_tasks)
 
         # 결과 처리
@@ -112,29 +104,25 @@ class SearchAgent(BaseAgent):
     
             # 카테고리에 따른 유연한 필터링
             is_valid = False
-            cat = place_category
+            
+            # [카테고리 수정] 카테고리 보정 로직 호출
+            cat = self._correct_category(google_info.get('types', []), place_category)
             
             if google_info:
                 g_rating = google_info['rating']
-                # [강력 처방] 평점이 0.1~3.0 사이라면 '진짜 나쁜 곳' 혹은 '부동산'임. 가차없이 커트!
-                if 0.1 <= g_rating < 3.0:
+                # [강력 처방] 평점이 0.1~3.5 사이라면 '진짜 나쁜 곳' 혹은 '부동산'임. 가차없이 커트!
+                if 0.1 <= g_rating < 3.5:
                     print(f"   - [Hard Cut] {google_info['name']}: 평점 {g_rating} (품질 미달)")
                     continue
 
                 if cat in ['식당', '카페']:
                     if g_rating >= 4.0: is_valid = True
                 else:
-                    is_valid = True # 평점 0.0(신규) 이거나 3.0 이상인 활동/관광지는 통과
-            
-            elif cat in ['활동', '관광지', '쇼핑']:
-                # 구글에 없어도 LLM이 추출했다면 '최신 팝업'일 가능성이 높으므로 통과
-                is_valid = True
-                google_info = {"name": place_name, "rating": 0.0, "reviews_count": 0, "address": "주소 정보 확인 필요"}
-            
+                    is_valid = True # 평점 0.0(신규) 이거나 3.5 이상인 활동/관광지는 통과
             
             if is_valid:
                 g_name = google_info['name']
-                if g_name in seen_names: continue
+                if not g_name or g_name in seen_names: continue
 
                 # all_raw_data에서 이 장소의 원본 텍스트를 찾아옵니다.
                 # item['source_url']과 일치하는 원문을 검색
@@ -146,7 +134,7 @@ class SearchAgent(BaseAgent):
                         break
  
                 # [V3 업그레이드] 언급 횟수(Mentions)를 점수 계산기에 전달
-                trust_score = self._calculate_trust_score_v3(
+                trust_score = self._calculate_trust_score_v4(
                     google_info['rating'], 
                     google_info['reviews_count'], 
                     original_desc, 
@@ -237,45 +225,22 @@ class SearchAgent(BaseAgent):
         }
     
 
-    # async def _extract_place_entities_with_source(self, raw_data: List[Dict], location: str) -> List[Dict]:
-    #     """
-    #     [범용 고도화] 어떤 테마에서도 60개 데이터를 샅샅이 뒤져 최대한 많은 장소를 발굴함.
-    #     배치 처리로 토큰 제한 문제 해결.
-    #     """
-    #     if not raw_data: return []
-        
-    #     # 배치 크기 설정 (토큰 제한 고려: gpt-4o-mini는 8192 토큰 제한이므로 6-8개씩 처리)
-    #     BATCH_SIZE = 6
-    #     all_results = []
-        
-    #     # 데이터를 배치로 나누기
-    #     batches = [raw_data[i:i + BATCH_SIZE] for i in range(0, len(raw_data), BATCH_SIZE)]
-    #     total_batches = len(batches)
-        
-    #     print(f"   📦 총 {len(raw_data)}개 데이터를 {total_batches}개 배치로 나눠 처리합니다...")
-        
-    #     # 각 배치를 순차적으로 처리
-    #     for batch_idx, batch_data in enumerate(batches, 1):
-    #         print(f"   🔄 배치 {batch_idx}/{total_batches} 처리 중... ({len(batch_data)}개 데이터)")
-            
-    #         try:
-    #             batch_results = await self._process_batch(batch_data, location, batch_idx, total_batches)
-    #             if batch_results:
-    #                 all_results.extend(batch_results)
-    #         except Exception as e:
-    #             print(f"   ⚠️  배치 {batch_idx} 처리 중 오류: {e}")
-    #             continue
-        
-    #     # 중복 제거 (같은 장소명, 같은 URL)
-    #     unique_results = []
-    #     seen = set()
-    #     for item in all_results:
-    #         key = (item.get('name', ''), item.get('source_url', ''))
-    #         if key not in seen and key[0]:  # 이름이 있는 경우만
-    #             seen.add(key)
-    #             unique_results.append(item)
-        
-    #     return unique_results
+    # [카테고리 수정] _correct_category 헬퍼 메소드 추가
+    def _correct_category(self, google_types: List[str], initial_category: str) -> str:
+        """구글의 types 정보를 바탕으로 카테고리를 보정합니다."""
+        CATEGORY_MAP = {
+            "카페": ["cafe", "bakery"],
+            "식당": ["restaurant", "meal_takeaway", "food"],
+            "활동": ["movie_theater", "art_gallery", "museum", "amusement_park"],
+            "쇼핑": ["shopping_mall", "department_store", "clothing_store", "book_store"],
+            "관광지": ["tourist_attraction", "park", "landmark"],
+            "숙소": ["lodging"],
+        }
+        for category, keywords in CATEGORY_MAP.items():
+            if any(keyword in google_types for keyword in keywords):
+                return category # 1순위: 구글 정보로 확정
+        return initial_category # 2순위: 구글 정보 없으면 LLM 분류 존중
+    
     
     async def _extract_place_entities_with_source(self, raw_data: List[Dict], location: str) -> List[Dict]:
         """
@@ -724,7 +689,7 @@ class SearchAgent(BaseAgent):
         return clean_name
     
     def _get_google_data(self, name: str, location: str) -> Optional[Dict]:
-        """Google Places API 검증 (이름 정제 로직 포함) - 지역 검증 추가"""
+        """Google Places API 검증 (이름 정제 로직 포함) - 지역 검증 추가 + types"""
         try:
             # [수정] 지저분한 이름을 청소하고 검색
             search_name = self._clean_place_name(name)
@@ -755,17 +720,18 @@ class SearchAgent(BaseAgent):
                                 photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_reference}&key={self.google_maps_api_key}"
                         
                         # 사진이 없을 때만 Place Details API 호출 (주소 정확도 향상을 위해)
+                        # [카테고리 수정] Place Details 호출 시 'types' 필드 요청 추가
                         if not photo_url and place_id:
                             try:
                                 details = self.gmaps.place(
                                     place_id=place_id,
-                                    fields=['formatted_address', 'photos']
+                                    fields=['formatted_address', 'photos', 'types']
                                 )
                                 
                                 if details.get('result'):
                                     result = details['result']
                                     detailed_address = result.get('formatted_address', address)
-                                    
+                                    place['types'] = result.get('types',[])
                                     # 사진 정보 가져오기
                                     photos = result.get('photos', [])
                                     if photos and len(photos) > 0:
@@ -781,7 +747,8 @@ class SearchAgent(BaseAgent):
                             "rating": place.get("rating", 0.0),
                             "reviews_count": place.get("user_ratings_total", 0),
                             "address": detailed_address,
-                            "photo_url": photo_url  # 사진 URL 추가
+                            "photo_url": photo_url,  # 사진 URL 추가
+                            "types": place.get("types",[]) #types 반환
                         }
                 
                 # 해당 지역에 맞는 결과가 없으면 첫 번째 결과도 사용하되 경고 출력
@@ -806,7 +773,8 @@ class SearchAgent(BaseAgent):
                     "rating": first_place.get("rating", 0.0),
                     "reviews_count": first_place.get("user_ratings_total", 0),
                     "address": address if address else "주소 정보 확인 필요",
-                    "photo_url": photo_url
+                    "photo_url": photo_url,
+                    "types": first_place.get("types",[]) #types 반환
                 }
         except Exception as e:
             print(f"      ⚠️ 구글 API 에러: {e}")
@@ -935,33 +903,64 @@ class SearchAgent(BaseAgent):
         # 지역명이 주소에 포함되어 있지 않으면 False
         return False
     
-    def _calculate_trust_score_v3(self, google_rating: float, google_reviews: int, content: str, category: str, mention_count: int) -> float:
+    def _calculate_trust_score_v4(self, google_rating: float, google_reviews: int, content: str, category: str, mention_count: int) -> float:
         """
-        [V3] 인기도(Mention Count)가 반영된 최종 신뢰도 점수
+        [v4] 가중 평점, 카테고리별 가중치, 페널티 시스템을 도입한 고도화된 신뢰도 점수
         """
-        # 1. 기본 점수 (평점 0.0인 최신 장소는 4.0점에서 시작)
-        score = google_rating if google_rating > 0 else 4.0
+        # --- 1. 기본 점수: '가중 평점(Bayesian Average)'으로 보정 ---
+        # 리뷰 수가 적은 높은 평점을 약간 낮추고, 리뷰 수가 매우 많은 평점을 신뢰
+        # C: 보정에 필요한 최소 리뷰 수 (일종의 '기본 신뢰도'). 이보다 적으면 전체 평균 쪽으로 점수 조정.
+        # m: 전체 장소의 평균 평점 (기본값)
+        C = 50.0  # 최소 50개의 리뷰가 쌓여야 평점을 온전히 신뢰하기 시작한다고 가정
+        m = 4.2   # 데이터셋의 평균 평점 (가정)
         
-        # 2. 보조 지표 1: 구글 리뷰 수 (공식 인기도)
-        if google_reviews > 500: score += 0.2
-        elif google_reviews > 100: score += 0.1
-    
-        # 3. 보조 지표 2: 웹 언급 횟수 (트렌드 인기도)
-        # 여러 블로그/사이트에서 공통으로 발견될수록 가산점 부여 (최대 0.4)
+        # 리뷰가 하나도 없는 신규 장소는 4.0점에서 시작 (기존 로직 유지)
+        if google_reviews == 0:
+            base_score = 4.0
+        else:
+            base_score = (google_reviews / (google_reviews + C)) * google_rating + (C / (google_reviews + C)) * m
+        
+        score = base_score
+
+        # --- 2. 공통 가산점 ---
+        # 2-1. 웹 언급 횟수 (화제성)
         if mention_count > 1:
-            score += (mention_count - 1) * 0.15
+            score += (mention_count - 1) * 0.1 # 가중치 약간 감소 (과도한 광고성 노출 방지)
 
-        # 4. 보조 지표 3: 키워드 가산점
-        trust_keywords = ['내돈내산', '솔직후기', '분위기', '친절']
-        for kw in trust_keywords:
-            if kw in content: score += 0.05
-            
-        # 활동/관광지 전용 트렌드 키워드
-        if category in ['활동', '쇼핑', '관광지']:
-            if any(kw in content for kw in ['최신', '팝업', '오픈', '핫플']):
+        # 2-2. 신뢰 키워드 (긍정적 경험)
+        if any(kw in content for kw in ['재방문', '인생맛집', '또간집', '또왔']):
+            score += 0.15 # 강력한 긍정 신호
+        if any(kw in content for kw in ['내돈내산', '솔직후기']):
+            score += 0.05 # 일반 긍정 신호
+
+        # --- 3. 카테고리별 특화 가산점 ---
+        if category in ['식당', '카페']:
+            # 맛/분위기 관련 키워드
+            if any(kw in content for kw in ['분위기', '인테리어', '감성', '뷰가 좋은']):
                 score += 0.1
+        elif category in ['활동', '관광지', '쇼핑']:
+            # 트렌드/새로움 관련 키워드
+            if any(kw in content for kw in ['최신', '팝업', '신상', '새로 생긴']):
+                score += 0.15
+            # 경험의 질 관련 키워드
+            if any(kw in content for kw in ['꿀잼', '시간 가는 줄', '만족', '알찬']):
+                score += 0.1
+        
+        # --- 4. 페널티 시스템 (부정적 경험 감지) ---
+        penalty_keywords = ['비추', '실망', '별로', '다신 안', '최악', '불친절', '위생', '절대 가지마', '후회']
+        penalty_score = 0
+        for kw in penalty_keywords:
+            if kw in content:
+                penalty_score += 0.5 # 부정적 신호는 강력하게 반영
 
-        return round(min(score, 5.0), 2)
+        # "분위기는 좋은데 불친절" 같은 복합 문맥 감지 (간단한 버전)
+        if ('좋지만' in content or '좋은데' in content) and any(pkw in content for pkw in ['불친절', '별로', '아쉬']):
+            penalty_score += 0.2
+
+        score -= penalty_score
+
+        # 최종 점수는 0점 미만으로 내려가지 않고, 5점을 초과하지 않도록 보정
+        return round(max(0, min(score, 5.0)), 2)
 
 
     def validate_input(self, input_data: Dict[str, Any]) -> bool:

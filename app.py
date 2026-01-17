@@ -157,6 +157,9 @@ async def execute_Agents():
         
         global course
         course = course_result.get("course", {})
+        # location 정보 추가 (지오코딩에 사용)
+        if input_data.get("location"):
+            course["location"] = input_data["location"]
         
         # 코스 설명
         if course.get("course_description"):
@@ -251,6 +254,12 @@ def reset():
 
 @app.route('/call-agent')
 def call_agents():
+    # session에서 실제 입력값 가져와서 input_data 업데이트
+    global input_data
+    if 'selections' in session and len(session['selections']) >= len(messages):
+        selections = session['selections']
+        input_data = dict(zip(input_data.keys(), selections))
+    
     session.pop('selections', None)
     threading.Thread(target=run_agent_task).start()
     return render_template('loading.html')

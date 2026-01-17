@@ -38,8 +38,16 @@ class SearchAgent(BaseAgent):
         theme = input_data.get("theme")
         location = input_data.get("location")
         
-        # 1. 전략 수립 (행동 분석 및 카테고리 설계)
-        print(f"\n🧠 [Step 1] 테마 분석 및 코스 설계 중...")
+        # [수정] 사용자 요청 지역의 행정구역 정보 미리 분석
+        print(f"\n📍 [Step 1-1] 사용자 요청 지역 분석: '{location}'")
+        target_city, target_gu = self._get_target_admin_areas(location)
+        if not target_city and not target_gu:
+            print(f"   ⚠️ '{location}' 지역 분석 실패. 기존 문자열 비교 방식으로 검증합니다.")
+        else:
+            print(f"   - 분석 결과: City='{target_city or 'N/A'}', Gu='{target_gu or 'N/A'}'")
+     
+        # 전략 수립 (행동 분석 및 카테고리 설계)
+        print(f"\n🧠 [Step 1-2] 테마 분석 및 코스 설계 중...")
         
         strategy = await self._generate_strategy(theme, location)
         if not strategy:
@@ -47,7 +55,7 @@ class SearchAgent(BaseAgent):
         
 
         # 2. Tavily 멀티 검색 (본문 데이터 확보)
-        print(f"📡 [Step 2] Tavily를 통해 방대한 실시간 데이터 수집 중... ")
+        print(f"📡 [Step 2] Tavily를 통해 실시간 데이터 수집 중... ")
 
         # Tavily 검색 결과 수 최적화 (20 -> 15로 줄여서 처리 시간 단축, 정확도 유지)
         tasks = [
@@ -83,147 +91,88 @@ class SearchAgent(BaseAgent):
             mention_counts[name] = mention_counts.get(name, 0) + 1
 
         # 4. Google Maps 기반 검증 (병렬 처리로 속도 최적화)
-        print(f"🔍 [Step 3-2] Google Places API로 장소 검증 중... ({len(refined_data)}개)")
-        category_buckets = {} # 카테고리별로 장소를 담을 바구니
-        seen_names = set() # 중복 제거용
+        print(f"🔍 [Step 3-3] Google Places API로 장소 검증 중... ({len(refined_data)}개)")
 
         async def process_place_item(agent_self, item):
             place_name = item.get('name')
-            place_category = item.get('category', '기타')
             clean_name = agent_self._clean_place_name(place_name)
             google_info = await asyncio.to_thread(agent_self._get_google_data, clean_name, location)
-            return item, google_info, place_category
-
+            return item, google_info
+        
         place_tasks = [process_place_item(self, item) for item in refined_data]
         place_results = await asyncio.gather(*place_tasks)
+        
+        # [수정] 필터링 로직을 검증 루프 밖으로 빼서 가독성 향상
+        all_valid_places = []
+        for item, google_info in place_results:
+            if not google_info: continue
 
-        # 결과 처리
-        for item, google_info, place_category in place_results:
-            # item에서 place_name 가져오기 (변수 스코프 문제 해결)
-            place_name = item.get('name')
-    
-            # 카테고리에 따른 유연한 필터링
-            is_valid = False
-            
-            # [카테고리 수정] 카테고리 보정 로직 호출
-            cat = self._correct_category(google_info.get('types', []), place_category)
-            
-            if google_info:
-                g_rating = google_info['rating']
-                # [강력 처방] 평점이 0.1~3.5 사이라면 '진짜 나쁜 곳' 혹은 '부동산'임. 가차없이 커트!
-                if 0.1 <= g_rating < 3.5:
-                    print(f"   - [Hard Cut] {google_info['name']}: 평점 {g_rating} (품질 미달)")
+            # 1. 지역 필터링
+            if target_city or target_gu: # 구조적 비교 가능 시
+                if not self._is_in_target_area(google_info.get('address_components', []), target_city, target_gu):
                     continue
-
-                if cat in ['식당', '카페']:
-                    if g_rating >= 4.0: is_valid = True
-                else:
-                    is_valid = True # 평점 0.0(신규) 이거나 3.5 이상인 활동/관광지는 통과
+            else: # Fallback: 기존 문자열 비교
+                if not self._is_location_match_fallback(google_info.get('address',''), location):
+                    continue
             
-            if is_valid:
-                g_name = google_info['name']
-                if not g_name or g_name in seen_names: continue
+            # 2. 카테고리 보정
+            initial_category = item.get('category', '기타')
+            corrected_category = self._correct_category(google_info.get('types', []), initial_category)
 
-                # all_raw_data에서 이 장소의 원본 텍스트를 찾아옵니다.
-                # item['source_url']과 일치하는 원문을 검색
-                original_desc = ""
-                for raw in all_raw_data:
-                    if raw['url'] == item.get('source_url'):
-                        # title과 snippet을 조합하여 원본 텍스트 재구성
-                        original_desc = f"{raw.get('title', '')} {raw.get('snippet', '')}".strip()
-                        break
- 
-                # [V3 업그레이드] 언급 횟수(Mentions)를 점수 계산기에 전달
-                trust_score = self._calculate_trust_score_v4(
-                    google_info['rating'], 
-                    google_info['reviews_count'], 
-                    original_desc, 
-                    cat,
-                    mention_counts.get(place_name, 1) # 언급 횟수 추가
-                )
+            # 3. 품질 필터링
+            g_rating = google_info.get('rating', 0.0)
+            if 0.1 <= g_rating < 3.5: 
+                print(f"   - [Hard Cut] {google_info['name']}: 평점 {g_rating} (품질 미달)")
+                continue
 
-                # 🔗 URL 인코딩 처리 (공백을 +로 치환하여 클릭 가능하게)
-                encoded_name = g_name.replace(" ", "+")
-                map_url = f"https://www.google.com/maps/search/?api=1&query={encoded_name}+{location.replace(' ', '+')}"
+            if corrected_category in ['식당', '카페'] and g_rating < 4.0: continue
 
-                #print(f"   - [Keep] {google_info['name']} (평점: {google_info['rating']})")
-                
-                place_obj = {
-                    "name": g_name,
-                    "category": cat,
-                    "rating": google_info['rating'],
-                    "trust_score": trust_score,
-                    "address": google_info['address'],
-                    "source_url": item.get('source_url'),
-                    "map_url": map_url,
-                    "photo_url": google_info.get('photo_url')  # 사진 URL 추가
-                }
-
-                # [핵심 추가] 바구니에 담기
-                if cat not in category_buckets:
-                    category_buckets[cat] = []
-                category_buckets[cat].append(place_obj)
-
-                seen_names.add(g_name)
-
-
-        # ============================================================
-        # 5. [라운드 로빈 선발] 다양성 보장 로직
-        # ============================================================
-        final_pool = []
-        TOTAL_LIMIT = 15
-
-        # 각 카테고리 내에서 점수 순으로 미리 정렬
-        for cat in category_buckets:
-            category_buckets[cat].sort(key=lambda x: x['trust_score'], reverse=True)
-
-        # 1차 목표: 전략 카테고리 (Step 2에서 설계한 3개)
-        strategic_cats = [step['category'] for step in strategy['course_structure']]
-        # 2차 목표: 나머지 카테고리
-        other_cats = [c for c in category_buckets.keys() if c not in strategic_cats]
-        
-        # 전체 순회 순서: [전략1, 전략2, 전략3, 기타1, 기타2...]
-        ordered_cats = strategic_cats + other_cats
-
-        # ❗ [핵심] 한 바퀴 돌 때마다 '딱 한 개씩'만 뽑습니다.
-        while len(final_pool) < TOTAL_LIMIT:
-            added_in_this_round = False
-            
-            for cat in ordered_cats:
-                if len(final_pool) >= TOTAL_LIMIT: break
-                
-                if cat in category_buckets and category_buckets[cat]:
-                    final_pool.append(category_buckets[cat].pop(0))
-                    added_in_this_round = True
-            
-            # 모든 바구니가 비었으면 종료
-            if not added_in_this_round:
-                break
-
-        # 중복 제거 (이름 기준)
-        seen = set()
-        unique_final_pool = []
-        for p in final_pool:
-            if p['name'] not in seen:
-                unique_final_pool.append(p)
-                seen.add(p['name'])
-        
-        final_pool = unique_final_pool[:TOTAL_LIMIT]
-        
-        # SearchAgent.execute()의 리턴값 다음 에이전트에게 줄 '최종 패키지'
-        return {
-            "success": True,
-            "agent_name": self.name,
-            "action_analysis": strategy.get('action_analysis'),
-            "candidate_pool": final_pool,
-            "user_intent": {
-                "course_structure": strategy.get('course_structure'),
-                # 여기에 reasoning 정보가 step별로 포함되어 있어 데이터가 휘발되지 않음
-                "raw_theme": theme,
-                "location": location
+            # 모든 필터 통과 시, 최종 객체 생성
+            place_obj = {
+                "google_info": google_info, "item": item,
+                "category": corrected_category, "place_name": item.get('name')
             }
+            all_valid_places.append(place_obj)
+
+        # ============================================================
+        # [수정] 최종 후보군 생성 (라운드 로빈 -> 품질 기반 선별)
+        # ============================================================
+        # 신뢰도 점수 계산
+        for p_obj in all_valid_places:
+            original_desc = next((f"{raw.get('title', '')} {raw.get('snippet', '')}".strip() for raw in all_raw_data if raw['url'] == p_obj['item'].get('source_url')), "")
+            p_obj['trust_score'] = self._calculate_trust_score_v4(
+                p_obj['google_info'].get('rating', 0.0), p_obj['google_info'].get('reviews_count', 0),
+                original_desc, p_obj['category'], mention_counts.get(p_obj['place_name'], 1)
+            )
+
+        # 신뢰도 점수 순으로 정렬
+        all_valid_places.sort(key=lambda p: p['trust_score'], reverse=True)
+        
+        # 중복 제거 및 상위 40개 선택
+        candidate_pool_raw, seen_names = [], set()
+        for p_obj in all_valid_places:
+            g_name = p_obj['google_info'].get('name')
+            if g_name and g_name not in seen_names:
+                map_url = f"https://www.google.com/maps/search/?api=1&query={g_name.replace(' ', '+')}+{location.replace(' ', '+')}"
+                candidate_pool_raw.append({
+                    "name": g_name, "category": p_obj['category'], "rating": p_obj['google_info'].get('rating', 0.0),
+                    "trust_score": p_obj['trust_score'], "address": p_obj['google_info'].get('address'),
+                    "coordinates": p_obj['google_info'].get('coordinates'),
+                    "source_url": p_obj['item'].get('source_url'), "map_url": map_url,
+                    "photo_url": p_obj['google_info'].get('photo_url')
+                })
+                seen_names.add(g_name)
+        
+        candidate_pool = candidate_pool_raw[:40]
+
+        print(f"\n✅ 1차 필터링 완료: {len(candidate_pool)}개의 유효 후보 장소를 다음 에이전트로 전달합니다.")
+        
+        return {
+            "success": True, "agent_name": self.name,
+            "action_analysis": strategy.get('action_analysis'), "candidate_pool": candidate_pool,
+            "user_intent": {"course_structure": strategy.get('course_structure'), "raw_theme": theme, "location": location}
         }
-    
+     
 
     # [카테고리 수정] _correct_category 헬퍼 메소드 추가
     def _correct_category(self, google_types: List[str], initial_category: str) -> str:
@@ -689,219 +638,110 @@ class SearchAgent(BaseAgent):
         return clean_name
     
     def _get_google_data(self, name: str, location: str) -> Optional[Dict]:
-        """Google Places API 검증 (이름 정제 로직 포함) - 지역 검증 추가 + types"""
+        """Google Places API 검증 - 기존 코드 기반에 address_components, types, geometry 추가"""
+        
         try:
-            # [수정] 지저분한 이름을 청소하고 검색
             search_name = self._clean_place_name(name)
             query = f"{location} {search_name}"
             
-            #print(f"   🔎 구글 검색 시도: '{query}'") # 어떤 키워드로 구글에 물어보는지 확인용
-            
             res = self.gmaps.places(query=query)
-            if res.get('results'):
-                # 지역 검증: 주소에 해당 지역이 포함되어 있는지 확인
-                location_normalized = self._normalize_location(location)
-                
-                for place in res.get('results', []):
-                    address = place.get("formatted_address", "")
-                    place_id = place.get("place_id")
-                    
-                    # 주소에 해당 지역이 포함되어 있는지 확인
-                    if self._is_location_match(address, location_normalized, location):
-                        # 사진 URL 생성 (최적화: 기본 응답에서 먼저 확인, 없을 때만 Place Details 호출)
-                        photo_url = None
-                        detailed_address = address
-                        
-                        # 먼저 기본 응답에서 사진 확인 (Place Details 호출 없이)
-                        photos = place.get('photos', [])
-                        if photos and len(photos) > 0:
-                            photo_reference = photos[0].get('photo_reference')
-                            if photo_reference:
-                                photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_reference}&key={self.google_maps_api_key}"
-                        
-                        # 사진이 없을 때만 Place Details API 호출 (주소 정확도 향상을 위해)
-                        # [카테고리 수정] Place Details 호출 시 'types' 필드 요청 추가
-                        if not photo_url and place_id:
-                            try:
-                                details = self.gmaps.place(
-                                    place_id=place_id,
-                                    fields=['formatted_address', 'photos', 'types']
-                                )
-                                
-                                if details.get('result'):
-                                    result = details['result']
-                                    detailed_address = result.get('formatted_address', address)
-                                    place['types'] = result.get('types',[])
-                                    # 사진 정보 가져오기
-                                    photos = result.get('photos', [])
-                                    if photos and len(photos) > 0:
-                                        photo_reference = photos[0].get('photo_reference')
-                                        if photo_reference:
-                                            photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_reference}&key={self.google_maps_api_key}"
-                            except Exception as e:
-                                # Place Details 실패해도 기본 정보는 사용
-                                pass  # 에러 로그 제거로 속도 향상
-                        
-                        return {
-                            "name": place.get("name"), # 구글이 확인해준 진짜 가게 이름
-                            "rating": place.get("rating", 0.0),
-                            "reviews_count": place.get("user_ratings_total", 0),
-                            "address": detailed_address,
-                            "photo_url": photo_url,  # 사진 URL 추가
-                            "types": place.get("types",[]) #types 반환
-                        }
-                
-                # 해당 지역에 맞는 결과가 없으면 첫 번째 결과도 사용하되 경고 출력
-                # (너무 엄격한 필터링 방지)
-                first_place = res['results'][0]
-                address = first_place.get("formatted_address", "")
-                place_id = first_place.get("place_id")
-                
-                print(f"      ⚠️ 지역 검증 실패: '{name}' - 주소: {address}, 요청 지역: {location}")
-                
-                # 사진 URL 생성 (최적화: 기본 응답에서 먼저 확인)
+            if not res.get('results'):
+                return None
+
+            place_id = res['results'][0].get('place_id')
+            if not place_id:
+                # place_id가 없는 경우, 기본 정보라도 사용
+                place = res['results'][0]
                 photo_url = None
-                photos = first_place.get('photos', [])
-                if photos and len(photos) > 0:
-                    photo_reference = photos[0].get('photo_reference')
-                    if photo_reference:
-                        photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_reference}&key={self.google_maps_api_key}"
+                if place.get('photos'):
+                    photo_ref = place['photos'][0].get('photo_reference')
+                    if photo_ref:
+                        photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_ref}&key={self.google_maps_api_key}"
                 
-                # 지역 검증 실패했지만 기본 정보는 반환 (사용자가 확인 가능하도록)
+                # [수정] coordinates 정보도 기본 응답에서 추출 시도
+                coordinates = None
+                if 'geometry' in place and 'location' in place['geometry']:
+                    loc = place['geometry']['location']
+                    coordinates = {'lat': loc['lat'], 'lng': loc['lng']}
+
                 return {
-                    "name": first_place.get("name"),
-                    "rating": first_place.get("rating", 0.0),
-                    "reviews_count": first_place.get("user_ratings_total", 0),
-                    "address": address if address else "주소 정보 확인 필요",
-                    "photo_url": photo_url,
-                    "types": first_place.get("types",[]) #types 반환
+                    "name": place.get("name"), "rating": place.get("rating", 0.0),
+                    "reviews_count": place.get("user_ratings_total", 0), "address": place.get("formatted_address"),
+                    "photo_url": photo_url, "types": place.get("types", []),
+                    "address_components": [], "coordinates": coordinates # 상세 정보 없으므로 빈 리스트 반환
                 }
+
+            # [최종 버그 수정] 필드명을 올바른 단수형으로 변경
+            fields = [
+                'name', 'rating', 'user_ratings_total', 'formatted_address', 
+                'photo', 'type', 'address_component', 'geometry/location'
+            ]
+            details_result = self.gmaps.place(place_id, fields=fields)
+            
+            if not details_result or not details_result.get('result'):
+                return None
+            
+            place = details_result['result']
+            
+            photo_url = None
+            if 'photos' in place and place['photos']:
+                photo_ref = place['photos'][0].get('photo_reference')
+                if photo_ref:
+                    photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_ref}&key={self.google_maps_api_key}"
+            
+            coordinates = None
+            if 'geometry' in place and 'location' in place['geometry']:
+                loc = place['geometry']['location']
+                coordinates = {'lat': loc['lat'], 'lng': loc['lng']}
+
+            return {
+                "name": place.get("name"),
+                "rating": place.get("rating", 0.0),
+                "reviews_count": place.get("user_ratings_total", 0),
+                "address": place.get("formatted_address"),
+                "photo_url": photo_url,
+                "types": place.get("types", []),
+                "address_components": place.get("address_components", []),
+                "coordinates": coordinates
+            }
         except Exception as e:
             print(f"      ⚠️ 구글 API 에러: {e}")
             return None
-        return None
     
-    def _normalize_location(self, location: str) -> str:
-        """지역명 정규화 (서울특별시 -> 서울, 서울 성수동 -> 서울, 부산광역시 -> 부산)"""
-        # 한국의 주요 도시 정규화
-        location_map = {
-            "서울특별시": "서울",
-            "서울시": "서울",
-            "부산광역시": "부산",
-            "부산시": "부산",
-            "대구광역시": "대구",
-            "대구시": "대구",
-            "인천광역시": "인천",
-            "인천시": "인천",
-            "광주광역시": "광주",
-            "광주시": "광주",
-            "대전광역시": "대전",
-            "대전시": "대전",
-            "울산광역시": "울산",
-            "울산시": "울산",
-            "경기도": "경기",
-            "강원도": "강원",
-            "충청북도": "충북",
-            "충청남도": "충남",
-            "전라북도": "전북",
-            "전라남도": "전남",
-            "경상북도": "경북",
-            "경상남도": "경남",
-        }
-        
-        # 먼저 전체 문자열로 매칭 시도
-        normalized = location_map.get(location, location)
-        
-        # 매칭되지 않으면 복합 지역명 처리 (예: "서울 성수동" -> "서울")
-        if normalized == location:
-            # 주요 도시명으로 시작하는지 확인
-            for city_key, city_value in location_map.items():
-                if location.startswith(city_key.replace("특별시", "").replace("광역시", "").replace("시", "")):
-                    normalized = city_value
-                    break
-            # "서울", "부산" 등으로 시작하는 경우도 처리
-            for city_value in set(location_map.values()):
-                if location.startswith(city_value):
-                    normalized = city_value
-                    break
-        
-        # 마지막으로 공백 제거
-        return normalized.strip()
-    
-    def _is_location_match(self, address: str, normalized_location: str, original_location: str) -> bool:
-        """주소가 해당 지역에 속하는지 확인 (동/구 단위까지 고려)"""
-        if not address:
-            return False
-        
-        # 주소를 소문자로 변환하여 비교 (대소문자 무시)
-        address_lower = address.lower()
-        normalized_lower = normalized_location.lower()
-        original_lower = original_location.lower()
-        
-        # 한국의 주요 도시별 검증 (특수 케이스 - 제외 도시 먼저 확인)
-        # 예: "서울"인데 주소에 "부산"이나 "경주"가 포함되어 있으면 False
-        exclusion_map = {
-            "서울": ["부산", "대구", "인천", "광주", "대전", "울산", "경주", "제주"],
-            "부산": ["서울", "대구", "인천", "광주", "대전", "울산", "경주", "제주"],
-            "경주": ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "제주"],
-        }
-        
-        # 제외 도시가 주소에 포함되어 있으면 False 반환
-        if normalized_location in exclusion_map:
-            for excluded_city in exclusion_map[normalized_location]:
-                if excluded_city.lower() in address_lower:
-                    return False
-        
-        # 1. 정규화된 지역명 또는 원본 지역명이 주소에 포함되어 있는지 확인
-        if normalized_lower in address_lower or original_lower in address_lower:
-            return True
-        
-        # 2. 복합 지역명 처리 (예: "서울 성수동" -> 주소에 "seoul"과 "seongdong" 또는 "성동" 확인)
-        # "서울 성수동" 같은 경우 주소에 "seoul"이 있으면 통과
-        if " " in original_location:
-            parts = original_location.split()
-            # 첫 번째 부분이 주요 도시명인지 확인
-            main_city = parts[0]
-            main_city_normalized = self._normalize_location(main_city)
-            
-            # 주소에 주요 도시명이 포함되어 있으면 통과
-            if main_city_normalized.lower() in address_lower:
-                return True
-            
-            # 동/구 단위 매칭 (예: "성수동" -> "seongdong-gu" 또는 "성동구")
-            if len(parts) > 1:
-                district = parts[1]
-                # 한글 동명을 영문으로 변환한 패턴 체크 (간단한 매칭)
-                district_map = {
-                    "성수동": ["seongdong", "seongsu", "성동"],
-                    "홍대": ["hongdae", "mapo", "마포"],
-                    "강남": ["gangnam", "강남"],
-                    "명동": ["myeongdong", "중구", "jung"],
-                    "이태원": ["itaewon", "용산", "yongsan"],
-                }
-                
-                if district in district_map:
-                    for pattern in district_map[district]:
-                        if pattern.lower() in address_lower:
-                            return True
-        
-        # 3. 영어 주소에서 한국 주요 도시 매칭
-        city_en_map = {
-            "서울": "seoul",
-            "부산": "busan",
-            "대구": "daegu",
-            "인천": "incheon",
-            "광주": "gwangju",
-            "대전": "daejeon",
-            "울산": "ulsan",
-        }
-        
-        if normalized_location in city_en_map:
-            if city_en_map[normalized_location] in address_lower:
-                return True
-        
-        # 지역명이 주소에 포함되어 있지 않으면 False
-        return False
+    # [신규] 지역 분석 및 검증을 위한 헬퍼 메소드들
+    def _get_target_admin_areas(self, location_name: str) -> Tuple[str, str]:
+        """사용자가 입력한 지역명의 시/도 및 구/군 정보를 반환합니다."""
+        try:
+            geocode_result = self.gmaps.geocode(location_name)
+            if not geocode_result: return "", ""
+            city, gu = "", ""
+            for component in geocode_result[0]['address_components']:
+                types = component['types']
+                if 'administrative_area_level_1' in types: city = component['long_name']
+                if 'locality' in types or 'sublocality_level_1' in types:
+                    if not gu: gu = component['long_name']
+            return city, gu
+        except Exception:
+            return "", ""
+
+    def _is_in_target_area(self, components: List[Dict], target_city: str, target_gu: str) -> bool:
+        """장소의 주소 구성요소가 타겟 지역에 속하는지 구조적으로 비교합니다."""
+        if not components: return False
+        place_city, place_gu = "", ""
+        for component in components:
+            types = component['types']
+            if 'administrative_area_level_1' in types: place_city = component['long_name']
+            if 'locality' in types or 'sublocality_level_1' in types:
+                if not place_gu: place_gu = component['long_name']
+        if target_city and place_city and target_city != place_city: return False
+        if target_gu and place_gu and target_gu != place_gu: return False
+        return True
+
+    def _is_location_match_fallback(self, address: str, original_location: str) -> bool:
+        """지역 분석 실패 시 사용하는 문자열 기반의 간단한 지역 검증."""
+        if not address: return False
+        return original_location.lower() in address.lower()
+
     
     def _calculate_trust_score_v4(self, google_rating: float, google_reviews: int, content: str, category: str, mention_count: int) -> float:
         """

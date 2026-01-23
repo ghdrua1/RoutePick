@@ -1,29 +1,23 @@
 import asyncio
 import threading
-from flask import Flask, render_template, request, session, jsonify, redirect, url_for
-from chatbot import get_chatbot_response
-from agents import SearchAgent, PlanningAgent, RoutingAgent
+from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask_cors import CORS
+from chatbot import get_chatbot_response  # chatbot.py가 course 객체를 인자로 받도록 수정 필요
+from agents import SearchAgent, PlanningAgent
 from config.config import Config
+import uuid
 
 app = Flask(__name__)
 app.secret_key = 'string_secret_key'
+CORS(app)
 
-messages = ["📌 여행 테마", "📍 지역", "👥 여행 인원 (숫자)", "📅 방문 일자", "⏰ 방문 시간", "🚶 이동 수단"]
-input_data = {
-        "theme": "theme",
-        "location": "location",
-        "group_size": "group_size",
-        "visit_date": "visit_date",
-        "visit_time": "visit_time",
-        "transportation": "transportation"
-    }
+# 여러 사용자의 작업 상태와 결과를 저장하는 '개인 사물함'
+agent_tasks = {}
 
-course = {}
-
-agent_done = False
-
-async def execute_Agents():
+async def execute_Agents(task_id, input_data):
+    global agent_tasks
     config = Config.get_agent_config()
+
     try:
         search_agent = SearchAgent(config=config)
         search_input = {
@@ -57,10 +51,12 @@ async def execute_Agents():
         search_result = await search_agent.execute(search_input)
         
         if not search_result.get("success"):
-            error_msg = f"❌ 장소 검색 실패: {search_result.get('error', '알 수 없는 오류')}"
-            return False, error_msg
-        
+            raise Exception(f"장소 검색 실패: {search_result.get('error', '알 수 없는 오류')}")
+
         places = search_result.get("candidate_pool", [])
+        if not places:
+            raise Exception("검색된 장소가 없습니다. 다른 테마나 지역으로 시도해주세요.")
+        
         print(f"\n✅ 검색 완료: {len(places)}개의 장소를 찾았습니다.\n")
         # yield f"\n✅ 검색 완료: {len(places)}개의 장소를 찾았습니다."
         """
@@ -68,11 +64,7 @@ async def execute_Agents():
         html page에 동적으로 중간 과정 메세지 출력.
         queue, yield 사용.
         """
-        
-        if not places:
-            error_msg = "⚠️  검색된 장소가 없습니다. 다른 테마나 지역으로 시도해주세요."
-            return False, error_msg
-        
+
         # 검색된 장소 미리보기
         print("📍 검색된 장소 미리보기 (상위 5개):")
         for i, place in enumerate(places[:5], 1):
@@ -90,10 +82,10 @@ async def execute_Agents():
         # 사용자 선호도 구성
         user_preferences = {
             "theme": input_data["theme"],
-            "group_size": input_data["group_size"],
-            "visit_date": input_data["visit_date"] or "2024-12-25",
-            "visit_time": input_data["visit_time"] or "오후",
-            "transportation": input_data["transportation"] or "도보"
+            "group_size": input_data.get("group_size", "1명"),
+            "visit_date": input_data.get("visit_date") or "오늘",
+            "visit_time": input_data.get("visit_time") or "오후",
+            "transportation": input_data.get("transportation") or "도보"
         }
         
         # 시간 제약 (선택사항)
@@ -143,39 +135,31 @@ async def execute_Agents():
         course_result = await planning_agent.execute(planning_input)
         
         if not course_result.get("success"):
-            error_msg = f"❌ 코스 제작 실패: {course_result.get('error', '알 수 없는 오류')}"
-            return False, error_msg
+            raise Exception(f"코스 제작 실패: {course_result.get('error', '알 수 없는 오류')}")
         
         # ============================================================
         # 결과 출력
         # ============================================================
-        print()
-        print("=" * 70)
-        print("✨ 코스 제작 완료!")
-        print("=" * 70)
-        print()
-        
-        global course
-        course = course_result.get("course", {})
-        # location 정보 추가 (지오코딩에 사용)
+        final_course = course_result.get("course", {})
         if input_data.get("location"):
-            course["location"] = input_data["location"]
-        
-        # reasoning 정보도 course에 추가 (챗봇에서 사용)
+            final_course["location"] = input_data["location"]
         if course_result.get("reasoning"):
-            course["reasoning"] = course_result.get("reasoning")
+            final_course["reasoning"] = course_result.get("reasoning")
+        
+        print(f"\n✨ [{task_id}] 코스 제작 완료! 터미널에서 결과 확인:")
+        print("=" * 70)
         
         # 코스 설명
-        if course.get("course_description"):
+        if final_course.get("course_description"):
             print("📝 코스 설명")
             print("-" * 70)
-            print(course["course_description"])
+            print(final_course["course_description"])
             print()
         
         # 방문 순서
-        sequence = course.get("sequence", [])
-        places_list = course.get("places", [])
-        estimated_duration = course.get("estimated_duration", {})
+        sequence = final_course.get("sequence", [])
+        places_list = final_course.get("places", [])
+        estimated_duration = final_course.get("estimated_duration", {})
         
         if sequence and places_list:
             print("📍 방문 순서")
@@ -187,16 +171,11 @@ async def execute_Agents():
                     duration = estimated_duration.get(str(place_idx), "정보 없음")
                     
                     print(f"\n{idx}. {place.get('name', '알 수 없음')}")
-                    print(f"   📌 카테고리: {place.get('category', 'N/A')}")
-                    print(f"   ⏱  체류 시간: {duration}분")
-                    print(f"   ⭐ 평점: {place.get('rating', 'N/A')}")
-                    print(f"   📍 주소: {place.get('address', '주소 정보 없음')}")
+                    print(f"   - 카테고리: {place.get('category', 'N/A')}")
+                    print(f"   - 체류 시간: {duration}분")
                     
-                    if place.get('map_url'):
-                        print(f"   🔗 지도: {place['map_url']}")
-            
             print()
-        
+
         # 선정 이유
         reasoning = course_result.get("reasoning")
         if reasoning:
@@ -204,101 +183,90 @@ async def execute_Agents():
             print("-" * 70)
             print(reasoning)
             print()
-        
+            
         print("=" * 70)
-        print("✅ 테스트 완료!")
-        print("=" * 70)
-        
-    except KeyboardInterrupt:
-        print("\n\n⚠️  사용자에 의해 중단되었습니다.")
+
+        # 최종 결과를 사용자 사물함에 저장
+        agent_tasks[task_id].update({"done": True, "success": True, "course": final_course})
+
     except Exception as e:
-        print(f"\n❌ 오류 발생: {str(e)}")
+        print(f"\n❌ [{task_id}] 에이전트 실행 중 오류 발생: {str(e)}")
         import traceback
         traceback.print_exc()
+        agent_tasks[task_id].update({"done": True, "success": False, "error": str(e)})
 
-def run_agent_task():
-    global agent_done
-    asyncio.run(execute_Agents())
-    agent_done = True
+def run_agent_task_with_id(task_id, input_data):
+    asyncio.run(execute_Agents(task_id, input_data))
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if 'selections' not in session:
-        session['selections'] = []
-
-    if request.method == 'POST':
-        user_input = request.form['choice']
-        choice_source = request.form['source']
-        # print(user_input, choice_source)
-        if user_input is not None:
-            # 입력값을 명시적으로 str()로 변환하여 저장
-            val = str(user_input)
-            
-            temp_list = session['selections']
-            temp_list.append(val)
-            session['selections'] = temp_list
-
-    current_step = len(session['selections'])
-    finished = current_step >= len(messages)
-    input_dataset = dict(zip(input_data.keys(), session['selections']))
-    return render_template('index.html', 
-                           step=current_step + 1,
-                           messages = messages, 
-                           finished=finished,
-                           results=session['selections'])
-
-@app.route("/status")
-def status():
-    return {"done": agent_done}
-
-@app.route('/reset')
-def reset():
-    session.pop('selections', None)
-    return redirect(url_for('index'))
-
-@app.route('/call-agent')
-def call_agents():
-    # session에서 실제 입력값 가져와서 input_data 업데이트
-    global input_data
-    if 'selections' in session and len(session['selections']) >= len(messages):
-        selections = session['selections']
-        input_data = dict(zip(input_data.keys(), selections))
+@app.route('/api/create-trip', methods=['POST'])
+def create_trip():
+    data = request.json
+    task_id = str(uuid.uuid4())
     
-    session.pop('selections', None)
-    threading.Thread(target=run_agent_task).start()
-    return render_template('loading.html')
+    input_data_from_react = {
+        "theme": data.get("theme"), "location": data.get("location"),
+        "group_size": data.get("groupSize"),
+        "visit_date": f"{data.get('startDate')} ~ {data.get('endDate')}" if data.get('endDate') and data.get('startDate') != data.get('endDate') else data.get('startDate'),
+        "visit_time": data.get("visitTime"),
+        "transportation": ", ".join(data.get("transportation", []) + ([data.get("customTransport")] if data.get("customTransport") else []))
+    }
+    
+    agent_tasks[task_id] = {"done": False, "success": False, "course": None}
+    threading.Thread(target=run_agent_task_with_id, args=(task_id, input_data_from_react)).start()
+    
+    print(f"🚀 [{task_id}] 신규 작업 시작.")
+    return jsonify({"taskId": task_id, "status": "processing"})
 
-@app.route('/chat-map')
-def chat_page():
-    # .env 파일에서 Google Maps API 키 가져오기 (Config는 이미 상단에서 import됨)
-    return render_template('chat.html',
-                           course=course,
-                           google_maps_api_key=Config.GOOGLE_MAPS_API_KEY)
+@app.route("/status/<task_id>")
+def status(task_id):
+    task_status = agent_tasks.get(task_id, {})
+    # course 데이터는 용량이 크므로 상태 체크 시에는 제외하고 보냄
+    return jsonify({
+        "done": task_status.get("done", False),
+        "success": task_status.get("success", False),
+        "error": task_status.get("error")
+    })
 
+@app.route('/chat-map/<task_id>')
+def chat_page(task_id):
+    task = agent_tasks.get(task_id)
+    if task and task.get('success'):
+        course_data = task.get('course')
+        return render_template('chat.html', course=course_data, google_maps_api_key=Config.GOOGLE_MAPS_API_KEY)
+    else:
+        error_message = task.get('error', '알 수 없는 오류') if task else '유효하지 않은 접근입니다.'
+        # TODO: 더 나은 에러 페이지를 보여줄 수 있음
+        return f"여행 경로 생성에 실패했습니다: {error_message}", 404
+
+# --- 채팅 API: 이제 task_id를 받아 해당 코스에 대해 채팅하도록 수정 ---
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
     user_message = data.get("message")
+    task_id = data.get("taskId") # 프론트엔드에서 taskId를 함께 보내줘야 함
+
+    if not all([user_message, task_id]):
+        return jsonify({"response": "메시지 또는 taskId가 누락되었습니다."}), 400
     
-    if not user_message:
-        return jsonify({"response": "메시지를 입력해주세요."}), 400
-    
-    # chatbot.py의 로직 호출
-    global course
-    bot_response = get_chatbot_response(user_message, course)
+    task = agent_tasks.get(task_id)
+    if not task or not task.get('success'):
+        return jsonify({"response": "유효하지 않은 taskId입니다."}), 400
+
+    current_course = task.get('course')
+    bot_response = get_chatbot_response(user_message, current_course)
     
     return jsonify({"response": bot_response})
 
-@app.route('/api/locations', methods=['GET'])
-def get_locations():
-    global course
-    # 코스 정보에 reasoning도 포함하여 반환
-    result = course.copy() if course else {}
-    
-    # reasoning이 별도로 저장되어 있다면 추가 (course_result에서 가져올 수도 있음)
-    # 현재는 course 객체에 포함되어 있다고 가정
-    
-    return jsonify(result)
+# --- 기타 API (필요 시 수정) ---
+@app.route('/api/locations/<task_id>', methods=['GET'])
+def get_locations(task_id):
+    task = agent_tasks.get(task_id)
+    if not task or not task.get('success'):
+        return jsonify({"error": "유효하지 않은 taskId입니다."}), 404
+    return jsonify(task.get('course', {}))
+
+# 기존의 단계별 입력 방식은 이제 사용되지 않으므로 주석 처리하거나 삭제 가능
+# @app.route('/', methods=['GET', 'POST']) ...
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5000)

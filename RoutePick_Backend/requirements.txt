@@ -23,3 +23,7 @@ numpy
 
 Flask-Cors
 uuid
+
+langchain>=0.3.27
+langchain-core>=0.3.80
+langchain-openai>=0.3.35

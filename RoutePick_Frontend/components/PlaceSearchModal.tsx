@@ -94,9 +94,13 @@ const PlaceSearchModal: React.FC<PlaceSearchModalProps> = ({ isOpen, onClose }) 
   };
 
   const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
+    if (!searchQuery.trim()) {
+      showToast('검색어를 입력해주세요.', 'info');
+      return;
+    }
 
     setIsSearching(true);
+    setSearchResults([]); // 이전 검색 결과 초기화
     try {
       const response = await fetch('http://127.0.0.1:5000/api/search-place', {
         method: 'POST',
@@ -104,15 +108,25 @@ const PlaceSearchModal: React.FC<PlaceSearchModalProps> = ({ isOpen, onClose }) 
         body: JSON.stringify({ query: searchQuery })
       });
 
+      const data = await response.json();
+
       if (response.ok) {
-        const data = await response.json();
-        setSearchResults(data.places || []);
+        const places = data.places || [];
+        setSearchResults(places);
+        if (places.length === 0) {
+          showToast('검색 결과가 없습니다. 다른 검색어를 시도해보세요.', 'info');
+        } else {
+          showToast(`${places.length}개의 장소를 찾았습니다.`, 'success');
+        }
       } else {
-        showToast('장소 검색에 실패했습니다.', 'error');
+        const errorMessage = data.error || '장소 검색에 실패했습니다.';
+        console.error('검색 API 오류:', errorMessage);
+        showToast(errorMessage, 'error');
       }
     } catch (error) {
       console.error('검색 오류:', error);
-      showToast('장소 검색 중 오류가 발생했습니다.', 'error');
+      const errorMessage = error instanceof Error ? error.message : '장소 검색 중 오류가 발생했습니다.';
+      showToast(errorMessage, 'error');
     } finally {
       setIsSearching(false);
     }

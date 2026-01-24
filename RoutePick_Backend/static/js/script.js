@@ -223,16 +223,22 @@ window.drawActualRoute = async function(coords, places, courseData) {
         // Directions Service 사용
         const directionsService = new google.maps.DirectionsService();
 
-        // 이동 수단 결정
+        // 이동 수단 결정 (사용자가 입력한 교통수단 우선)
         const transportation = courseData.transportation || '도보';
         let travelMode = google.maps.TravelMode.WALKING;
         
+        // 우선순위: 지하철/버스 > 자동차 > 도보 > 자전거
+        // 자전거는 사용자가 명시적으로 선택한 경우에만 사용
         if (transportation.includes('버스') || transportation.includes('지하철')) {
             travelMode = google.maps.TravelMode.TRANSIT;
         } else if (transportation.includes('자동차')) {
             travelMode = google.maps.TravelMode.DRIVING;
         } else if (transportation.includes('자전거')) {
+            // 자전거는 사용자가 명시적으로 선택한 경우에만 사용
             travelMode = google.maps.TravelMode.BICYCLING;
+        } else {
+            // 기본값은 도보
+            travelMode = google.maps.TravelMode.WALKING;
         }
 
         // 각 구간별로 경로 그리기

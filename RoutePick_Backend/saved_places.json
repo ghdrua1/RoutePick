@@ -16,14 +16,5 @@
     "category": "식당",
     "lat": 37.5642308,
     "lng": 126.9835303
-  },
-  {
-    "name": "타오마라탕",
-    "address": "대한민국 서울특별시 마포구 양화로6길 19",
-    "place_id": "ChIJU73jSRGZfDURcaTfVqLRwGI",
-    "rating": 4.6,
-    "category": "식당",
-    "lat": 37.5492527,
-    "lng": 126.9152841
   }
 ]

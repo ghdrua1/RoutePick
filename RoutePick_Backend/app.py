@@ -213,7 +213,8 @@ async def execute_Agents(task_id, input_data):
             "group_size": input_data.get("group_size", "1명"),
             "visit_date": input_data.get("visit_date") or "오늘",
             "visit_time": input_data.get("visit_time") or "오후",
-            "transportation": input_data.get("transportation") or "도보"
+            "transportation": input_data.get("transportation") or "도보",
+            "budget": input_data.get("budget")  # 예산 정보 추가
         }
         
         # 시간 제약 (선택사항)
@@ -339,7 +340,8 @@ def create_trip():
         "group_size": data.get("groupSize"),
         "visit_date": f"{data.get('startDate')} ~ {data.get('endDate')}" if data.get('endDate') and data.get('startDate') != data.get('endDate') else data.get('startDate'),
         "visit_time": data.get("visitTime"),
-        "transportation": ", ".join(data.get("transportation", []) + ([data.get("customTransport")] if data.get("customTransport") else []))
+        "transportation": ", ".join(data.get("transportation", []) + ([data.get("customTransport")] if data.get("customTransport") else [])),
+        "budget": data.get("budget")  # 예산 정보 추가
     }
     
     agent_tasks[task_id] = {"done": False, "success": False, "course": None}
@@ -600,12 +602,27 @@ def get_route_guide(task_id):
         '자전거': 'bicycling'
     }
     
-    # transportation 문자열에서 이동 수단 추출
+    # transportation 문자열에서 이동 수단 추출 (우선순위: 지하철/버스 > 자동차 > 도보 > 자전거)
+    # 사용자가 입력한 교통수단을 우선적으로 사용
     transport_mode = 'walking'  # 기본값
-    for key, value in mode_mapping.items():
-        if key in transportation:
-            transport_mode = value
-            break
+    preferred_modes = []
+    
+    # 사용자가 입력한 교통수단 우선순위대로 추출
+    if '지하철' in transportation or '버스' in transportation:
+        preferred_modes.append('transit')
+    if '자동차' in transportation:
+        preferred_modes.append('driving')
+    if '도보' in transportation:
+        preferred_modes.append('walking')
+    if '자전거' in transportation:
+        preferred_modes.append('bicycling')
+    
+    # 사용자가 입력한 교통수단이 있으면 첫 번째 것을 사용
+    if preferred_modes:
+        transport_mode = preferred_modes[0]
+    else:
+        # 입력이 없으면 기본값 사용 (자전거는 제외)
+        transport_mode = 'walking'
     
     # sequence 순서대로 장소 재배열
     ordered_places = []
@@ -676,10 +693,21 @@ def get_route_guide(task_id):
             
             routing_agent = RoutingAgent(config=config)
             
+            # 사용자가 입력한 교통수단 리스트 (우선순위 순서)
+            user_transport_modes = preferred_modes if preferred_modes else [transport_mode]
+            # 자전거는 사용자가 명시적으로 선택하지 않은 경우 제외
+            if 'bicycling' not in transportation.lower() and '자전거' not in transportation:
+                user_transport_modes = [m for m in user_transport_modes if m != 'bicycling']
+            
+            # 첫 번째 우선 교통수단 사용
+            primary_mode = user_transport_modes[0] if user_transport_modes else 'walking'
+            
             routing_input = {
                 "places": ordered_places,
-                "mode": transport_mode,
-                "optimize_waypoints": False  # sequence 순서 유지
+                "mode": primary_mode,
+                "optimize_waypoints": False,  # sequence 순서 유지
+                "preferred_modes": user_transport_modes,  # 대안 교통수단 리스트
+                "user_transportation": transportation  # 원본 입력값
             }
             
             # 비동기 실행
@@ -735,6 +763,16 @@ def get_route_guide(task_id):
                     guide_text += f"   📍 도착지: {to_addr}\n"
                 guide_text += f"   ⏱ 소요 시간: {duration_text}\n"
                 guide_text += f"   📏 거리: {distance_text}\n"
+                
+                # 사용된 교통수단 표시
+                mode_display = {
+                    "transit": "🚌 대중교통",
+                    "driving": "🚗 자동차",
+                    "walking": "🚶 도보",
+                    "bicycling": "🚴 자전거"
+                }
+                actual_mode = mode_display.get(mode, f"이동 수단: {mode}")
+                guide_text += f"   {actual_mode}\n"
                 
                 # 이동 수단별 상세 안내
                 if mode == "transit" and steps:
@@ -971,8 +1009,52 @@ def search_place():
         # Google Maps API 클라이언트 초기화
         gmaps = googlemaps.Client(key=Config.GOOGLE_MAPS_API_KEY)
         
-        # Places API로 검색
-        places_result = gmaps.places(query=query)
+        # Places API로 검색 (텍스트 검색)
+        # find_place 또는 places 메서드 사용
+        places_result = None
+        error_msg = None
+        
+        try:
+            # 방법 1: find_place 사용 (더 정확한 텍스트 검색)
+            find_result = gmaps.find_place(input=query, input_type='textquery', fields=['place_id', 'name', 'formatted_address', 'geometry', 'rating', 'types'])
+            if find_result.get('status') == 'OK' and find_result.get('candidates'):
+                # find_place 결과를 places 형식으로 변환
+                candidates = find_result.get('candidates', [])
+                places_result = {'results': []}
+                
+                # 각 후보에 대해 상세 정보 가져오기
+                for candidate in candidates[:10]:  # 최대 10개
+                    place_id = candidate.get('place_id')
+                    if place_id:
+                        try:
+                            # Place Details API로 상세 정보 가져오기
+                            details = gmaps.place(place_id, fields=['name', 'formatted_address', 'geometry', 'rating', 'types', 'place_id'])
+                            if details.get('result'):
+                                places_result['results'].append(details['result'])
+                        except Exception as e:
+                            print(f"⚠️ Place Details API 호출 실패 (place_id: {place_id}): {e}")
+                            # 상세 정보 없이 기본 정보만 사용
+                            places_result['results'].append(candidate)
+        except Exception as e:
+            error_msg = f"find_place 실패: {str(e)}"
+            print(f"⚠️ {error_msg}")
+        
+        # 방법 2: find_place가 실패하면 places 메서드 사용 (폴백)
+        if not places_result or not places_result.get('results'):
+            try:
+                # places 메서드는 query 파라미터를 사용
+                places_result = gmaps.places(query=query)
+            except Exception as e:
+                error_msg = f"places 검색 실패: {str(e)}"
+                print(f"⚠️ {error_msg}")
+                return jsonify({'error': f'장소 검색에 실패했습니다: {error_msg}'}), 500
+        
+        # API 응답 상태 확인
+        if places_result.get('status') and places_result.get('status') != 'OK':
+            status = places_result.get('status')
+            error_message = places_result.get('error_message', '알 수 없는 오류')
+            print(f"⚠️ Google Places API 오류: {status} - {error_message}")
+            return jsonify({'error': f'장소 검색에 실패했습니다: {status} - {error_message}'}), 500
         
         if not places_result.get('results'):
             return jsonify({'places': []})
@@ -996,9 +1078,14 @@ def search_place():
             
             places.append(place_data)
         
+        print(f"✅ 장소 검색 성공: '{query}' -> {len(places)}개 결과")
         return jsonify({'places': places})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        error_detail = str(e)
+        print(f"❌ 장소 검색 API 오류: {error_detail}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'장소 검색 중 오류가 발생했습니다: {error_detail}'}), 500
 
 @app.route('/api/save-place', methods=['POST'])
 def save_place():

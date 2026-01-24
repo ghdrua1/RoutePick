@@ -115,9 +115,14 @@ class GoogleMapsTool(BaseTool):
             # 최적화된 순서로 장소 재배열
             optimized_places = [places[i] for i in optimized_order]
             
+            # preferred_modes와 user_transportation 추출
+            preferred_modes = kwargs.get("preferred_modes")
+            user_transportation = kwargs.get("user_transportation")
+            
             # 최적화된 경로로 Directions API 호출
+            # preferred_modes가 있으면 각 구간별로 우선순위에 따라 시도
             directions, total_duration, total_distance = await self._get_optimized_route_directions(
-                optimized_places, origin, destination, mode
+                optimized_places, origin, destination, mode, preferred_modes, user_transportation
             )
             
             return {
@@ -716,7 +721,9 @@ class GoogleMapsTool(BaseTool):
         places: List[Dict[str, Any]],
         origin: Optional[Dict[str, Any]],
         destination: Optional[Dict[str, Any]],
-        mode: str
+        mode: str,
+        preferred_modes: Optional[List[str]] = None,
+        user_transportation: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], int, int]:
         """
         최적화된 경로의 전체 Directions 정보를 한 번의 API 호출로 획득
@@ -837,15 +844,21 @@ class GoogleMapsTool(BaseTool):
                             from_place = places[i] if i < len(places) else {"name": "Unknown"}
                             to_place = places[i + 1] if i + 1 < len(places) else {"name": "Unknown"}
                             
-                            # 단계별 경로 정보 추출
+                            # 단계별 경로 정보 추출 (대중교통 상세 정보 포함)
                             steps = []
                             for step in leg.get("steps", []):
-                                steps.append({
+                                step_data = {
                                     "instruction": step.get("html_instructions", ""),
                                     "distance": step.get("distance", {}).get("value", 0),
                                     "duration": step.get("duration", {}).get("value", 0),
                                     "travel_mode": step.get("travel_mode", mode)
-                                })
+                                }
+                                
+                                # 대중교통 상세 정보 추가
+                                if step.get("transit_details"):
+                                    step_data["transit_details"] = step.get("transit_details")
+                                
+                                steps.append(step_data)
                             
                             directions.append({
                                 "from": from_place.get("name", "Unknown"),
@@ -883,14 +896,16 @@ class GoogleMapsTool(BaseTool):
                     break
         
         # 폴백: 개별 구간별로 Directions API 호출
-        return await self._calculate_directions(places, origin, destination, mode)
+        return await self._calculate_directions(places, origin, destination, mode, preferred_modes, user_transportation)
     
     async def _calculate_directions(
         self,
         places: List[Dict[str, Any]],
         origin: Optional[Dict[str, Any]],
         destination: Optional[Dict[str, Any]],
-        mode: str
+        mode: str,
+        preferred_modes: Optional[List[str]] = None,
+        user_transportation: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], int, int]:
         """
         각 구간별 경로 정보 계산 (폴백 메서드, 병렬 처리)
@@ -957,7 +972,7 @@ class GoogleMapsTool(BaseTool):
         
         # 각 구간별로 Directions API 호출 (병렬 처리)
         async def get_segment_direction(from_item, to_item):
-            """단일 구간의 Directions 정보 가져오기"""
+            """단일 구간의 Directions 정보 가져오기 - 사용자가 입력한 교통수단 우선 사용"""
             from_coord = from_item["coord"]
             to_coord = to_item["coord"]
             from_place = from_item["place"]
@@ -966,112 +981,85 @@ class GoogleMapsTool(BaseTool):
             origin_str = f"{from_coord[0]},{from_coord[1]}"
             dest_str = f"{to_coord[0]},{to_coord[1]}"
             
-            for attempt in range(self._max_retries):
-                try:
-                    def call_directions():
-                        return self.client.directions(
-                            origin=origin_str,
-                            destination=dest_str,
-                            mode=mode
-                        )
-                    
-                    directions_result = await loop.run_in_executor(None, call_directions)
-                    
-                    if directions_result and len(directions_result) > 0:
-                        route = directions_result[0]
-                        if route.get("legs") and len(route["legs"]) > 0:
-                            leg = route["legs"][0]
-                            
-                            duration = leg.get("duration", {}).get("value", 0)
-                            distance = leg.get("distance", {}).get("value", 0)
-                            
-                            steps = []
-                            for step in leg.get("steps", []):
-                                steps.append({
-                                    "instruction": step.get("html_instructions", ""),
-                                    "distance": step.get("distance", {}).get("value", 0),
-                                    "duration": step.get("duration", {}).get("value", 0),
-                                    "travel_mode": step.get("travel_mode", mode)
-                                })
-                            
-                            return {
-                                "from": from_place.get("name", "Unknown"),
-                                "to": to_place.get("name", "Unknown"),
-                                "from_address": from_place.get("address", ""),
-                                "to_address": to_place.get("address", ""),
-                                "duration": duration,
-                                "distance": distance,
-                                "duration_text": leg.get("duration", {}).get("text", ""),
-                                "distance_text": leg.get("distance", {}).get("text", ""),
-                                "steps": steps,
-                                "mode": mode,
-                                "start_location": {
-                                    "lat": leg.get("start_location", {}).get("lat", 0),
-                                    "lng": leg.get("start_location", {}).get("lng", 0)
-                                },
-                                "end_location": {
-                                    "lat": leg.get("end_location", {}).get("lat", 0),
-                                    "lng": leg.get("end_location", {}).get("lng", 0)
-                                }
-                            }
-                    
-                    # 폴백: walking -> transit
-                    if mode == "walking" and attempt == 0:
-                        try:
-                            def call_directions_transit():
-                                return self.client.directions(
-                                    origin=origin_str,
-                                    destination=dest_str,
-                                    mode="transit"
-                                )
-                            directions_result = await loop.run_in_executor(None, call_directions_transit)
-                            if directions_result and len(directions_result) > 0:
-                                route = directions_result[0]
-                                if route.get("legs") and len(route["legs"]) > 0:
-                                    leg = route["legs"][0]
-                                    duration = leg.get("duration", {}).get("value", 0)
-                                    distance = leg.get("distance", {}).get("value", 0)
-                                    return {
-                                        "from": from_place.get("name", "Unknown"),
-                                        "to": to_place.get("name", "Unknown"),
-                                        "from_address": from_place.get("address", ""),
-                                        "to_address": to_place.get("address", ""),
-                                        "duration": duration,
-                                        "distance": distance,
-                                        "duration_text": leg.get("duration", {}).get("text", ""),
-                                        "distance_text": leg.get("distance", {}).get("text", ""),
-                                        "steps": [],
-                                        "mode": "transit",
-                                        "start_location": {"lat": from_coord[0], "lng": from_coord[1]},
-                                        "end_location": {"lat": to_coord[0], "lng": to_coord[1]},
-                                        "error": "walking 모드에서 경로를 찾지 못해 transit 모드로 변경"
-                                    }
-                        except:
-                            pass
-                    
-                except Exception as e:
-                    if attempt < self._max_retries - 1:
-                        await asyncio.sleep(self._retry_delay * (attempt + 1))
-                        continue
-                    else:
-                        return {
-                            "from": from_place.get("name", "Unknown"),
-                            "to": to_place.get("name", "Unknown"),
-                            "from_address": from_place.get("address", ""),
-                            "to_address": to_place.get("address", ""),
-                            "duration": 0,
-                            "distance": 0,
-                            "duration_text": "",
-                            "distance_text": "",
-                            "steps": [],
-                            "mode": mode,
-                            "start_location": {"lat": from_coord[0], "lng": from_coord[1]},
-                            "end_location": {"lat": to_coord[0], "lng": to_coord[1]},
-                            "error": f"API 호출 실패: {str(e)}"
-                        }
+            # 사용자가 입력한 교통수단 우선순위 리스트 (자전거 제외)
+            modes_to_try = preferred_modes if preferred_modes else [mode]
+            # 자전거는 사용자가 명시적으로 선택하지 않은 경우 제외
+            if user_transportation and '자전거' not in user_transportation and 'bicycling' not in user_transportation.lower():
+                modes_to_try = [m for m in modes_to_try if m != 'bicycling']
+            # 자전거가 없으면 기본값 추가
+            if not modes_to_try:
+                modes_to_try = ['walking', 'transit', 'driving']
             
-            # 모든 재시도 실패
-            return {
+            # 각 교통수단을 우선순위대로 시도
+            for try_mode in modes_to_try:
+                for attempt in range(self._max_retries):
+                    try:
+                        def call_directions():
+                            return self.client.directions(
+                                origin=origin_str,
+                                destination=dest_str,
+                                mode=try_mode
+                            )
+                        
+                        directions_result = await loop.run_in_executor(None, call_directions)
+                    
+                        if directions_result and len(directions_result) > 0:
+                            route = directions_result[0]
+                            if route.get("legs") and len(route["legs"]) > 0:
+                                leg = route["legs"][0]
+                                
+                                duration = leg.get("duration", {}).get("value", 0)
+                                distance = leg.get("distance", {}).get("value", 0)
+                                
+                                steps = []
+                                for step in leg.get("steps", []):
+                                    step_data = {
+                                        "instruction": step.get("html_instructions", ""),
+                                        "distance": step.get("distance", {}).get("value", 0),
+                                        "duration": step.get("duration", {}).get("value", 0),
+                                        "travel_mode": step.get("travel_mode", try_mode)
+                                    }
+                                    
+                                    # 대중교통 상세 정보 추가
+                                    if step.get("transit_details"):
+                                        step_data["transit_details"] = step.get("transit_details")
+                                    
+                                    steps.append(step_data)
+                                
+                                # 성공적으로 경로를 찾았으면 반환
+                                return {
+                                    "from": from_place.get("name", "Unknown"),
+                                    "to": to_place.get("name", "Unknown"),
+                                    "from_address": from_place.get("address", ""),
+                                    "to_address": to_place.get("address", ""),
+                                    "duration": duration,
+                                    "distance": distance,
+                                    "duration_text": leg.get("duration", {}).get("text", ""),
+                                    "distance_text": leg.get("distance", {}).get("text", ""),
+                                    "steps": steps,
+                                    "mode": try_mode,  # 실제 사용된 교통수단
+                                    "start_location": {
+                                        "lat": leg.get("start_location", {}).get("lat", 0),
+                                        "lng": leg.get("start_location", {}).get("lng", 0)
+                                    },
+                                    "end_location": {
+                                        "lat": leg.get("end_location", {}).get("lat", 0),
+                                        "lng": leg.get("end_location", {}).get("lng", 0)
+                                    }
+                                }
+                        
+                        # 이 모드로 경로를 찾지 못했으면 다음 모드 시도
+                        break
+                    
+                    except Exception as e:
+                        if attempt < self._max_retries - 1:
+                            await asyncio.sleep(self._retry_delay * (attempt + 1))
+                            continue
+                        # 이 모드로 실패했으면 다음 모드 시도
+                        break
+                
+                # 모든 모드 시도 실패
+                return {
                 "from": from_place.get("name", "Unknown"),
                 "to": to_place.get("name", "Unknown"),
                 "from_address": from_place.get("address", ""),

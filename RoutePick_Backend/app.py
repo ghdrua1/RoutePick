@@ -213,7 +213,8 @@ async def execute_Agents(task_id, input_data):
             "group_size": input_data.get("group_size", "1명"),
             "visit_date": input_data.get("visit_date") or "오늘",
             "visit_time": input_data.get("visit_time") or "오후",
-            "transportation": input_data.get("transportation") or "도보"
+            "transportation": input_data.get("transportation") or "도보",
+            "budget": input_data.get("budget")  # 예산 정보 추가
         }
         
         # 시간 제약 (선택사항)
@@ -339,7 +340,8 @@ def create_trip():
         "group_size": data.get("groupSize"),
         "visit_date": f"{data.get('startDate')} ~ {data.get('endDate')}" if data.get('endDate') and data.get('startDate') != data.get('endDate') else data.get('startDate'),
         "visit_time": data.get("visitTime"),
-        "transportation": ", ".join(data.get("transportation", []) + ([data.get("customTransport")] if data.get("customTransport") else []))
+        "transportation": ", ".join(data.get("transportation", []) + ([data.get("customTransport")] if data.get("customTransport") else [])),
+        "budget": data.get("budget")  # 예산 정보 추가
     }
     
     agent_tasks[task_id] = {"done": False, "success": False, "course": None}
@@ -600,12 +602,27 @@ def get_route_guide(task_id):
         '자전거': 'bicycling'
     }
     
-    # transportation 문자열에서 이동 수단 추출
+    # transportation 문자열에서 이동 수단 추출 (우선순위: 지하철/버스 > 자동차 > 도보 > 자전거)
+    # 사용자가 입력한 교통수단을 우선적으로 사용
     transport_mode = 'walking'  # 기본값
-    for key, value in mode_mapping.items():
-        if key in transportation:
-            transport_mode = value
-            break
+    preferred_modes = []
+    
+    # 사용자가 입력한 교통수단 우선순위대로 추출
+    if '지하철' in transportation or '버스' in transportation:
+        preferred_modes.append('transit')
+    if '자동차' in transportation:
+        preferred_modes.append('driving')
+    if '도보' in transportation:
+        preferred_modes.append('walking')
+    if '자전거' in transportation:
+        preferred_modes.append('bicycling')
+    
+    # 사용자가 입력한 교통수단이 있으면 첫 번째 것을 사용
+    if preferred_modes:
+        transport_mode = preferred_modes[0]
+    else:
+        # 입력이 없으면 기본값 사용 (자전거는 제외)
+        transport_mode = 'walking'
     
     # sequence 순서대로 장소 재배열
     ordered_places = []
@@ -676,10 +693,21 @@ def get_route_guide(task_id):
             
             routing_agent = RoutingAgent(config=config)
             
+            # 사용자가 입력한 교통수단 리스트 (우선순위 순서)
+            user_transport_modes = preferred_modes if preferred_modes else [transport_mode]
+            # 자전거는 사용자가 명시적으로 선택하지 않은 경우 제외
+            if 'bicycling' not in transportation.lower() and '자전거' not in transportation:
+                user_transport_modes = [m for m in user_transport_modes if m != 'bicycling']
+            
+            # 첫 번째 우선 교통수단 사용
+            primary_mode = user_transport_modes[0] if user_transport_modes else 'walking'
+            
             routing_input = {
                 "places": ordered_places,
-                "mode": transport_mode,
-                "optimize_waypoints": False  # sequence 순서 유지
+                "mode": primary_mode,
+                "optimize_waypoints": False,  # sequence 순서 유지
+                "preferred_modes": user_transport_modes,  # 대안 교통수단 리스트
+                "user_transportation": transportation  # 원본 입력값
             }
             
             # 비동기 실행
@@ -721,30 +749,162 @@ def get_route_guide(task_id):
             for i, direction in enumerate(directions, 1):
                 from_place = direction.get("from", "출발지")
                 to_place = direction.get("to", "도착지")
+                from_addr = direction.get("from_address", "")
+                to_addr = direction.get("to_address", "")
                 duration_text = direction.get("duration_text", "")
                 distance_text = direction.get("distance_text", "")
                 mode = direction.get("mode", transport_mode)
                 steps = direction.get("steps", [])
                 
                 guide_text += f"<strong>{i}. {from_place} → {to_place}</strong>\n"
+                if from_addr:
+                    guide_text += f"   📍 출발지: {from_addr}\n"
+                if to_addr:
+                    guide_text += f"   📍 도착지: {to_addr}\n"
                 guide_text += f"   ⏱ 소요 시간: {duration_text}\n"
                 guide_text += f"   📏 거리: {distance_text}\n"
                 
+                # 사용된 교통수단 표시
+                mode_display = {
+                    "transit": "🚌 대중교통",
+                    "driving": "🚗 자동차",
+                    "walking": "🚶 도보",
+                    "bicycling": "🚴 자전거"
+                }
+                actual_mode = mode_display.get(mode, f"이동 수단: {mode}")
+                guide_text += f"   {actual_mode}\n"
+                
                 # 이동 수단별 상세 안내
                 if mode == "transit" and steps:
-                    # 대중교통 상세 안내
-                    guide_text += f"   🚌 <strong>대중교통 안내:</strong>\n"
-                    for step in steps[:5]:  # 상위 5개 단계만 표시
-                        instruction = clean_html_tags(step.get("instruction", ""))
-                        if instruction:
-                            guide_text += f"      • {instruction}\n"
-                elif mode == "walking":
-                    guide_text += f"   🚶 <strong>도보 안내:</strong>\n"
-                    if steps:
-                        for step in steps[:3]:  # 상위 3개 단계만 표시
+                    # 대중교통 상세 안내 (지하철 노선, 버스 번호 등)
+                    guide_text += f"   🚌 <strong>대중교통 상세 안내:</strong>\n"
+                    
+                    transit_steps = []
+                    for step in steps:
+                        transit_detail = step.get("transit_details")
+                        if transit_detail:
+                            # 대중교통 상세 정보 추출
+                            line = transit_detail.get("line", {})
+                            vehicle = transit_detail.get("line", {}).get("vehicle", {})
+                            vehicle_type = vehicle.get("type", "").lower()
+                            
+                            departure_stop = transit_detail.get("departure_stop", {}).get("name", "")
+                            arrival_stop = transit_detail.get("arrival_stop", {}).get("name", "")
+                            num_stops = transit_detail.get("num_stops", 0)
+                            
+                            line_name = line.get("name", "")
+                            line_short_name = line.get("short_name", "")
+                            line_color = line.get("color", "")
+                            
+                            # 지하철인 경우
+                            if vehicle_type == "subway" or "subway" in vehicle_type or "지하철" in line_name or "호선" in line_name or "호선" in line_short_name:
+                                # 노선명 추출 (예: "2호선", "Line 2" 등)
+                                subway_line = line_short_name or line_name
+                                # "Line 2" -> "2호선" 변환 시도
+                                if "line" in subway_line.lower():
+                                    import re
+                                    line_num_match = re.search(r'(\d+)', subway_line)
+                                    if line_num_match:
+                                        subway_line = f"{line_num_match.group(1)}호선"
+                                
+                                transit_info = f"🚇 <strong>지하철 {subway_line}</strong>"
+                                if departure_stop:
+                                    transit_info += f"\n      - 출발역: {departure_stop}"
+                                if arrival_stop:
+                                    transit_info += f"\n      - 도착역: {arrival_stop}"
+                                if num_stops > 0:
+                                    transit_info += f"\n      - {num_stops}개 역 이동"
+                                
+                                # 출발/도착 시간 정보 추가
+                                departure_time = transit_detail.get("departure_time", {}).get("text", "")
+                                arrival_time = transit_detail.get("arrival_time", {}).get("text", "")
+                                if departure_time:
+                                    transit_info += f"\n      - 출발 시간: {departure_time}"
+                                if arrival_time:
+                                    transit_info += f"\n      - 도착 시간: {arrival_time}"
+                                
+                                transit_steps.append(transit_info)
+                            
+                            # 버스인 경우
+                            elif vehicle_type == "bus" or "bus" in vehicle_type or "버스" in line_name:
+                                bus_number = line_short_name or line_name
+                                # 버스 번호 정리 (예: "버스 123" -> "123번")
+                                import re
+                                bus_num_match = re.search(r'(\d+)', bus_number)
+                                if bus_num_match:
+                                    bus_number = f"{bus_num_match.group(1)}번"
+                                
+                                transit_info = f"🚌 <strong>버스 {bus_number}</strong>"
+                                if departure_stop:
+                                    transit_info += f"\n      - 출발 정류장: {departure_stop}"
+                                if arrival_stop:
+                                    transit_info += f"\n      - 도착 정류장: {arrival_stop}"
+                                if num_stops > 0:
+                                    transit_info += f"\n      - {num_stops}개 정류장 이동"
+                                
+                                # 출발/도착 시간 정보 추가
+                                departure_time = transit_detail.get("departure_time", {}).get("text", "")
+                                arrival_time = transit_detail.get("arrival_time", {}).get("text", "")
+                                if departure_time:
+                                    transit_info += f"\n      - 출발 시간: {departure_time}"
+                                if arrival_time:
+                                    transit_info += f"\n      - 도착 시간: {arrival_time}"
+                                
+                                transit_steps.append(transit_info)
+                            
+                            # 기타 대중교통
+                            else:
+                                transit_info = f"🚃 <strong>{line_name or line_short_name or '대중교통'}</strong>"
+                                if departure_stop:
+                                    transit_info += f"\n      - 출발: {departure_stop}"
+                                if arrival_stop:
+                                    transit_info += f"\n      - 도착: {arrival_stop}"
+                                if num_stops > 0:
+                                    transit_info += f"\n      - {num_stops}개 정거장 이동"
+                                transit_steps.append(transit_info)
+                        else:
+                            # 대중교통 상세 정보가 없는 경우 일반 안내
+                            instruction = clean_html_tags(step.get("instruction", ""))
+                            if instruction:
+                                transit_steps.append(f"      • {instruction}")
+                    
+                    # 상세 정보가 있으면 표시, 없으면 일반 안내
+                    if transit_steps:
+                        for transit_info in transit_steps[:8]:  # 최대 8개 표시
+                            guide_text += f"      {transit_info}\n"
+                    else:
+                        # 폴백: 일반 안내
+                        for step in steps[:5]:
                             instruction = clean_html_tags(step.get("instruction", ""))
                             if instruction:
                                 guide_text += f"      • {instruction}\n"
+                elif mode == "walking":
+                    guide_text += f"   🚶 <strong>도보 안내:</strong>\n"
+                    if steps:
+                        # 주요 방향 전환 지점만 표시 (너무 많은 정보는 혼란스러울 수 있음)
+                        important_steps = []
+                        for step in steps:
+                            instruction = clean_html_tags(step.get("instruction", ""))
+                            distance_text = step.get("distance", {}).get("text", "") if isinstance(step.get("distance"), dict) else ""
+                            
+                            # 중요한 단계만 필터링 (방향 전환, 큰 거리 등)
+                            if instruction and ("좌회전" in instruction or "우회전" in instruction or "직진" in instruction or 
+                                               "왼쪽" in instruction or "오른쪽" in instruction or "앞으로" in instruction):
+                                step_info = instruction
+                                if distance_text:
+                                    step_info += f" ({distance_text})"
+                                important_steps.append(step_info)
+                        
+                        if important_steps:
+                            for step_info in important_steps[:5]:  # 최대 5개
+                                guide_text += f"      • {step_info}\n"
+                        else:
+                            # 중요한 단계가 없으면 처음과 마지막만 표시
+                            if len(steps) > 0:
+                                first_instruction = clean_html_tags(steps[0].get("instruction", ""))
+                                if first_instruction:
+                                    guide_text += f"      • {first_instruction}\n"
+                            guide_text += f"      • {from_place}에서 {to_place}로 도보로 이동하세요.\n"
                     else:
                         guide_text += f"      • {from_place}에서 {to_place}로 도보로 이동하세요.\n"
                 elif mode == "driving":
@@ -849,8 +1009,52 @@ def search_place():
         # Google Maps API 클라이언트 초기화
         gmaps = googlemaps.Client(key=Config.GOOGLE_MAPS_API_KEY)
         
-        # Places API로 검색
-        places_result = gmaps.places(query=query)
+        # Places API로 검색 (텍스트 검색)
+        # find_place 또는 places 메서드 사용
+        places_result = None
+        error_msg = None
+        
+        try:
+            # 방법 1: find_place 사용 (더 정확한 텍스트 검색)
+            find_result = gmaps.find_place(input=query, input_type='textquery', fields=['place_id', 'name', 'formatted_address', 'geometry', 'rating', 'types'])
+            if find_result.get('status') == 'OK' and find_result.get('candidates'):
+                # find_place 결과를 places 형식으로 변환
+                candidates = find_result.get('candidates', [])
+                places_result = {'results': []}
+                
+                # 각 후보에 대해 상세 정보 가져오기
+                for candidate in candidates[:10]:  # 최대 10개
+                    place_id = candidate.get('place_id')
+                    if place_id:
+                        try:
+                            # Place Details API로 상세 정보 가져오기
+                            details = gmaps.place(place_id, fields=['name', 'formatted_address', 'geometry', 'rating', 'types', 'place_id'])
+                            if details.get('result'):
+                                places_result['results'].append(details['result'])
+                        except Exception as e:
+                            print(f"⚠️ Place Details API 호출 실패 (place_id: {place_id}): {e}")
+                            # 상세 정보 없이 기본 정보만 사용
+                            places_result['results'].append(candidate)
+        except Exception as e:
+            error_msg = f"find_place 실패: {str(e)}"
+            print(f"⚠️ {error_msg}")
+        
+        # 방법 2: find_place가 실패하면 places 메서드 사용 (폴백)
+        if not places_result or not places_result.get('results'):
+            try:
+                # places 메서드는 query 파라미터를 사용
+                places_result = gmaps.places(query=query)
+            except Exception as e:
+                error_msg = f"places 검색 실패: {str(e)}"
+                print(f"⚠️ {error_msg}")
+                return jsonify({'error': f'장소 검색에 실패했습니다: {error_msg}'}), 500
+        
+        # API 응답 상태 확인
+        if places_result.get('status') and places_result.get('status') != 'OK':
+            status = places_result.get('status')
+            error_message = places_result.get('error_message', '알 수 없는 오류')
+            print(f"⚠️ Google Places API 오류: {status} - {error_message}")
+            return jsonify({'error': f'장소 검색에 실패했습니다: {status} - {error_message}'}), 500
         
         if not places_result.get('results'):
             return jsonify({'places': []})
@@ -874,9 +1078,14 @@ def search_place():
             
             places.append(place_data)
         
+        print(f"✅ 장소 검색 성공: '{query}' -> {len(places)}개 결과")
         return jsonify({'places': places})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        error_detail = str(e)
+        print(f"❌ 장소 검색 API 오류: {error_detail}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'장소 검색 중 오류가 발생했습니다: {error_detail}'}), 500
 
 @app.route('/api/save-place', methods=['POST'])
 def save_place():

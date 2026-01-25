@@ -19,6 +19,10 @@ async def execute_Agents(task_id, input_data):
     config = Config.get_agent_config()
 
     try:
+        # 1. 검색 단계 시작 알림
+        agent_tasks[task_id]["message"] = f"🔍 '{input_data['location']}' 지역의 '{input_data['theme']}' 테마를 분석 중입니다..."
+        print(f"[{task_id}] 검색 시작")
+
         search_agent = SearchAgent(config=config)
         search_input = {
             "theme": input_data["theme"],
@@ -57,7 +61,13 @@ async def execute_Agents(task_id, input_data):
         if not places:
             raise Exception("검색된 장소가 없습니다. 다른 테마나 지역으로 시도해주세요.")
         
+        # 2. 검색 완료 알림 (실제 찾은 장소 개수 반영)
+        agent_tasks[task_id]["message"] = f"✅ 검색 완료: 총 {len(places)}개의 추천 장소를 발견했습니다."
         print(f"\n✅ 검색 완료: {len(places)}개의 장소를 찾았습니다.\n")
+
+        # 잠시 대기 (사용자가 메시지를 읽을 시간을 줌)
+        await asyncio.sleep(1.5)
+
         # yield f"\n✅ 검색 완료: {len(places)}개의 장소를 찾았습니다."
         """
         TODO
@@ -74,6 +84,8 @@ async def execute_Agents(task_id, input_data):
         # ============================================================
         # Step 2: PlanningAgent 실행 (코스 제작)
         # ============================================================
+        # 3. 코스 제작 단계 시작 알림
+        agent_tasks[task_id]["message"] = "🧠 [Planning] 최적의 동선과 방문 순서를 계산하고 있습니다..."        
         print("🧠 [Step 2] PlanningAgent: 코스 제작 중...")
         print()
         
@@ -140,6 +152,9 @@ async def execute_Agents(task_id, input_data):
         # ============================================================
         # 결과 출력
         # ============================================================
+        # 4. 마무리 단계 알림
+        agent_tasks[task_id]["message"] = "✨ 코스 제작 완료! 최종 결과를 정리 중입니다."      
+        
         final_course = course_result.get("course", {})
         if input_data.get("location"):
             final_course["location"] = input_data["location"]
@@ -190,14 +205,14 @@ async def execute_Agents(task_id, input_data):
         print("=" * 70)
 
         # 최종 결과를 사용자 사물함에 저장
-        agent_tasks[task_id].update({"done": True, "success": True, "course": final_course})
+        agent_tasks[task_id].update({"done": True, "success": True, "course": final_course, "message": "완료되었습니다."})
 
     except Exception as e:
         print(f"\n❌ [{task_id}] 에이전트 실행 중 오류 발생: {str(e)}")
         import traceback
         traceback.print_exc()
-        agent_tasks[task_id].update({"done": True, "success": False, "error": str(e)})
-
+        agent_tasks[task_id].update({"done": True, "success": False, "error": str(e), "message": f"오류 발생: {str(e)}"})
+        
 def run_agent_task_with_id(task_id, input_data):
     asyncio.run(execute_Agents(task_id, input_data))
 
@@ -214,7 +229,7 @@ def create_trip():
         "transportation": ", ".join(data.get("transportation", []) + ([data.get("customTransport")] if data.get("customTransport") else []))
     }
     
-    agent_tasks[task_id] = {"done": False, "success": False, "course": None}
+    agent_tasks[task_id] = {"done": False, "success": False, "course": None, "message": "🚀 여행 생성 작업을 시작합니다..." }
     threading.Thread(target=run_agent_task_with_id, args=(task_id, input_data_from_react)).start()
     
     print(f"🚀 [{task_id}] 신규 작업 시작.")
@@ -227,7 +242,8 @@ def status(task_id):
     return jsonify({
         "done": task_status.get("done", False),
         "success": task_status.get("success", False),
-        "error": task_status.get("error")
+        "error": task_status.get("error"),
+        "message": task_status.get("message", "로딩 중...") # 현재 진행 상황 메시지
     })
 
 @app.route('/chat-map/<task_id>')

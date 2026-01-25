@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { X, ArrowRight, ArrowLeft, Calendar as CalendarIcon, MapPin, Users, Footprints, Sparkles, Train, Bus, Car, Plus, ChevronLeft, ChevronRight, MoreHorizontal } from 'lucide-react';
+// 1. useRef 추가, Map 아이콘 추가
+import React, { useState, useEffect, useRef } from 'react'; 
+import { X, ArrowRight, ArrowLeft, Calendar as CalendarIcon, MapPin, Users, Footprints, Sparkles, Train, Bus, Car, Plus, ChevronLeft, ChevronRight, MoreHorizontal, Map } from 'lucide-react';
 
 // --- Loading Animation Assets ---
 const ICONS = [
@@ -65,6 +66,11 @@ const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
   
   // Loading Animation State
   const [activeLoadingStep, setActiveLoadingStep] = useState(0);
+  
+  // 2. 알림창 제어를 위한 State 추가 (컴포넌트 내부에 추가해주세요)
+  const [currentLog, setCurrentLog] = useState("여행 생성 요청 중..."); // 현재 표시할 메시지
+  const [showLog, setShowLog] = useState(false); // 알림창 보임/숨김 여부
+  const lastLogRef = useRef(""); // 중복 메시지 깜빡임 방지용
 
   // Calendar State
   const [currentMonth, setCurrentMonth] = useState(new Date());
@@ -132,14 +138,16 @@ const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
     }
   }, [isOpen, currentStep]);
 
-  const handleNext = async () => {
+const handleNext = async () => {
     if (currentStep < steps.length - 1) {
       setCurrentStep(prev => prev + 1);
     } else {
+        // 마지막 단계: 로딩 시작
         setIsLoading(true);
-        setTimeout(() => {
-        setIsCompleted(true);
-      }, 20000); // Increased total loading time to allow animation to play out (4 steps * 5s)
+        setShowLog(true); // 로딩 시작되자마자 알림창 띄우기
+
+        // [중요] 기존의 setTimeout(..., 20000) 코드는 삭제했습니다.
+        // 실제 백엔드 응답에 맞춰서 종료되도록 변경합니다.
 
       try {
         // 1. Flask 서버에 데이터 전송
@@ -158,32 +166,40 @@ const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
         const data = await response.json();
         const { taskId } = data;
 
-        // 2. 작업이 완료될 때까지 2초마다 상태 확인 (Polling)
+        // 2. 상태 확인 폴링 (1초 간격으로 변경하여 반응 속도 향상)
         const pollStatus = setInterval(async () => {
           try {
             const statusResponse = await fetch(`http://127.0.0.1:5000/status/${taskId}`);
             const statusData = await statusResponse.json();
 
+            // [추가된 부분] 백엔드 메시지를 화면에 반영 (메시지가 바뀌었을 때만)
+            if (statusData.message && statusData.message !== lastLogRef.current) {
+                lastLogRef.current = statusData.message;
+                
+                setShowLog(false); // 1. 살짝 숨기고 (애니메이션)
+                setTimeout(() => {
+                    setCurrentLog(statusData.message); // 2. 내용 바꾸고
+                    setShowLog(true); // 3. 다시 표시
+                }, 200);
+            }
+
             if (statusData.done) {
-              clearInterval(pollStatus); // 상태 확인 중단
-              setIsLoading(false);
+              clearInterval(pollStatus); // 폴링 중단
+              setIsLoading(false); // 로딩 끝 (이때 모든 애니메이션이 멈춥니다)
 
               if (statusData.success) {
-                // 3. 성공 시, chat-map 페이지로 이동
+                // 성공 시 이동
                 window.location.href = `http://127.0.0.1:5000/chat-map/${taskId}`;
               } else {
-                // 4. 실패 시, 에러 처리 (여기서는 간단히 alert)
                 alert(`여행 생성 실패: ${statusData.error || '알 수 없는 오류'}`);
-                onClose(); // 모달 닫기
+                onClose();
               }
             }
           } catch (error) {
-            clearInterval(pollStatus);
-            setIsLoading(false);
-            alert('상태 확인 중 오류가 발생했습니다.');
-            onClose();
+            // 에러 발생 시에도 계속 시도 (네트워크 일시적 끊김 대비)
+            console.warn("Polling error, retrying...", error);
           }
-        }, 2000); // 2초 간격으로 확인
+        }, 1000); // 1초마다 확인
 
       } catch (error) {
         setIsLoading(false);
@@ -383,6 +399,32 @@ const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
                         <div className="w-20 h-1.5 bg-gray-300 rounded-full"></div>
                    </div>
                 </div>
+                
+                {/* ▼▼▼ [새로 추가하는 부분] 알림창 (Notification Popup) ▼▼▼ */}
+                <div 
+                    className={`absolute top-12 left-4 right-4 md:left-6 md:right-6 z-30 transition-all duration-500 ease-out will-change-transform transform 
+                        ${showLog ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0 pointer-events-none'}
+                    `}
+                >
+                    <div className="bg-white/90 backdrop-blur-md rounded-[20px] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.12)] border border-white/50 flex items-center gap-4 max-w-2xl mx-auto">
+                        {/* 앱 아이콘 */}
+                        <div className="w-10 h-10 rounded-[10px] bg-gradient-to-b from-white to-gray-50 flex items-center justify-center shadow-[0_1px_3px_rgba(0,0,0,0.1)] border border-black/5 flex-shrink-0">
+                            <Map className="w-6 h-6 text-black" strokeWidth={1.5} />
+                        </div>
+                        
+                        {/* 텍스트 내용 */}
+                        <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between mb-0.5">
+                                <h3 className="text-[13px] font-bold text-black tracking-tight">RoutePick AI</h3>
+                                <span className="text-[11px] text-gray-500 font-medium">실시간</span>
+                            </div>
+                            <p className="text-[13px] text-gray-900 font-medium leading-snug truncate pr-2">
+                                {currentLog}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                {/* ▲▲▲ [추가 완료] ▲▲▲ */}                
                 
                 {/* Screen Content - Spline Map */}
                 <div className="absolute inset-0 pt-10 bg-gray-100 overflow-hidden">

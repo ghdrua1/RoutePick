@@ -1,5 +1,7 @@
 let map;
 let geocoder;
+let markers = [];  // 마커 추적
+let polylines = [];  // 경로 라인 추적
 
 async function initMap() {
     // google 객체가 로드되었는지 확인 (비동기 대응)
@@ -22,6 +24,9 @@ async function initMap() {
         const { Geocoder } = await google.maps.importLibrary("geocoding");
 
         geocoder = new Geocoder();
+        
+        // 전역 변수에 저장 (chatbot.js에서 사용)
+        window.geocoder = geocoder;
 
         map = new Map(document.getElementById("map-container"), {
             zoom: 12,
@@ -34,6 +39,11 @@ async function initMap() {
         google.maps.event.addListenerOnce(map, "idle", () => {
             processLocations(AdvancedMarkerElement, PinElement);
         });
+        
+        // 전역 변수에 저장 (chatbot.js에서 사용)
+        window.map = map;
+        window.markers = markers;
+        window.polylines = polylines;
 
     } catch (error) {
         console.error("Error loading Google Maps libraries:", error);
@@ -45,7 +55,8 @@ window.addEventListener('load', () => {
     initMap();
 });
 
-async function processLocations(AdvancedMarkerElement, PinElement) {
+// 전역으로 노출 (chatbot.js에서 사용)
+window.processLocations = async function(AdvancedMarkerElement, PinElement) {
     // 백엔드 데이터 가져오기
     const taskId = window.TASK_ID;
     if (!taskId) {
@@ -91,12 +102,15 @@ async function processLocations(AdvancedMarkerElement, PinElement) {
                     glyphColor: "white",
                 });
 
-                new AdvancedMarkerElement({
+                const marker = new AdvancedMarkerElement({
                     map: map,
                     position: coords,
                     title: place.name,
                     content: pin.element,
                 });
+                
+                // 마커 추적 배열에 추가
+                markers.push(marker);
 
                 // 카드 생성
                 createEnhancedCard(place, "card-matrix");
@@ -130,24 +144,101 @@ async function processLocations(AdvancedMarkerElement, PinElement) {
         validCoords.forEach(c => bounds.extend(c));
         map.fitBounds(bounds);
     }
+    
+    // 전역 변수 업데이트
+    window.markers = markers;
+    window.polylines = polylines;
+};
+
+// 이동 수단별 색상 정의
+const TRANSPORT_COLORS = {
+    'WALKING': '#4285F4',      // 파란색 - 도보
+    'DRIVING': '#9C27B0',      // 보라색 - 자동차
+    'BICYCLING': '#FFC107',    // 노란색 - 자전거
+    'TRANSIT_BUS': '#4CAF50',  // 초록색 - 버스
+    'TRANSIT_SUBWAY': '#F44336', // 빨간색 - 지하철
+    'TRANSIT': '#FF9800',      // 주황색 - 기타 대중교통
+    'FALLBACK': '#757575'      // 회색 - 폴백
+};
+
+// 이동 수단별 스타일 가져오기
+function getTransportStyle(travelMode, transitDetails) {
+    let color = TRANSPORT_COLORS.FALLBACK;
+    let strokeWeight = 5;
+    let strokeOpacity = 0.8;
+    let zIndex = 1;
+    
+    if (travelMode === 'WALKING') {
+        color = TRANSPORT_COLORS.WALKING;
+        strokeWeight = 4;
+        strokeOpacity = 0.7;
+        zIndex = 1;
+    } else if (travelMode === 'DRIVING') {
+        color = TRANSPORT_COLORS.DRIVING;
+        strokeWeight = 6;
+        strokeOpacity = 0.8;
+        zIndex = 2;
+    } else if (travelMode === 'BICYCLING') {
+        color = TRANSPORT_COLORS.BICYCLING;
+        strokeWeight = 4;
+        strokeOpacity = 0.7;
+        zIndex = 1;
+    } else if (travelMode === 'TRANSIT') {
+        // 대중교통인 경우 세부 정보 확인
+        if (transitDetails) {
+            const vehicle = transitDetails.line?.vehicle;
+            const vehicleType = vehicle?.type?.toLowerCase() || '';
+            const lineName = transitDetails.line?.name || '';
+            
+            if (vehicleType === 'subway' || 'subway' in vehicleType || '지하철' in lineName || '호선' in lineName) {
+                color = TRANSPORT_COLORS.TRANSIT_SUBWAY;
+                strokeWeight = 7;
+                strokeOpacity = 0.9;
+                zIndex = 3;
+            } else if (vehicleType === 'bus' || 'bus' in vehicleType || '버스' in lineName) {
+                color = TRANSPORT_COLORS.TRANSIT_BUS;
+                strokeWeight = 6;
+                strokeOpacity = 0.8;
+                zIndex = 2;
+            } else {
+                color = TRANSPORT_COLORS.TRANSIT;
+                strokeWeight = 5;
+                strokeOpacity = 0.8;
+                zIndex = 2;
+            }
+        } else {
+            color = TRANSPORT_COLORS.TRANSIT;
+            strokeWeight = 5;
+            strokeOpacity = 0.8;
+            zIndex = 2;
+        }
+    }
+    
+    return { color, strokeWeight, strokeOpacity, zIndex };
 }
 
-// 실제 도로 경로 그리기 함수
-async function drawActualRoute(coords, places, courseData) {
+// 실제 도로 경로 그리기 함수 (이동 수단별 색상 구분)
+window.drawActualRoute = async function(coords, places, courseData) {
     try {
-        // Directions Service 사용 (기존 API 방식)
+        // Directions Service 사용
         const directionsService = new google.maps.DirectionsService();
 
-        // 이동 수단 결정
+        // 이동 수단 결정 (사용자가 입력한 교통수단 우선)
         const transportation = courseData.transportation || '도보';
         let travelMode = google.maps.TravelMode.WALKING;
         
+        // 우선순위: 지하철/버스 > 자동차 > 도보 > 자전거
+        // 자전거는 사용자가 명시적으로 선택한 경우에만 사용
         if (transportation.includes('버스') || transportation.includes('지하철')) {
             travelMode = google.maps.TravelMode.TRANSIT;
         } else if (transportation.includes('자동차')) {
             travelMode = google.maps.TravelMode.DRIVING;
         } else if (transportation.includes('자전거')) {
+            // 자전거는 사용자가 명시적으로 선택한 경우에만 사용
             travelMode = google.maps.TravelMode.BICYCLING;
+        } else {
+            // 기본값은 도보
+            travelMode = google.maps.TravelMode.WALKING;
         }
 
         // 각 구간별로 경로 그리기
@@ -167,54 +258,57 @@ async function drawActualRoute(coords, places, courseData) {
                         },
                         (result, status) => {
                             if (status === google.maps.DirectionsStatus.OK && result.routes && result.routes.length > 0) {
-                                // 각 구간별로 별도의 Polyline 생성
                                 const route = result.routes[0];
                                 
-                                // 경로 좌표 추출 (overview_path 사용)
-                                const path = [];
-                                if (route.overview_path) {
-                                    route.overview_path.forEach(point => {
-                                        path.push({ lat: point.lat(), lng: point.lng() });
-                                    });
-                                } else if (route.overview_polyline) {
-                                    // overview_polyline이 있는 경우 디코딩
-                                    const decodedPath = google.maps.geometry.encoding.decodePath(route.overview_polyline.points);
-                                    decodedPath.forEach(point => {
-                                        path.push({ lat: point.lat(), lng: point.lng() });
-                                    });
-                                } else {
-                                    // legs에서 경로 추출
-                                    route.legs.forEach(leg => {
-                                        leg.steps.forEach(step => {
+                                // 각 leg의 step별로 경로 그리기 (이동 수단별 색상 구분)
+                                route.legs.forEach(leg => {
+                                    leg.steps.forEach(step => {
+                                        const stepPath = [];
+                                        
+                                        // step의 경로 좌표 추출
+                                        if (step.path) {
                                             step.path.forEach(point => {
-                                                path.push({ lat: point.lat(), lng: point.lng() });
+                                                stepPath.push({ lat: point.lat(), lng: point.lng() });
                                             });
-                                        });
+                                        }
+                                        
+                                        if (stepPath.length > 0) {
+                                            // step의 travel_mode와 transit_details 확인
+                                            const stepTravelMode = step.travel_mode || travelMode;
+                                            const stepTransitDetails = step.transit_details;
+                                            
+                                            // 이동 수단별 스타일 가져오기
+                                            const style = getTransportStyle(stepTravelMode, stepTransitDetails);
+                                            
+                                            // 각 step별로 polyline 생성
+                                            const polyline = new google.maps.Polyline({
+                                                path: stepPath,
+                                                strokeColor: style.color,
+                                                strokeOpacity: style.strokeOpacity,
+                                                strokeWeight: style.strokeWeight,
+                                                zIndex: style.zIndex,
+                                                map: map
+                                            });
+                                            
+                                            polylines.push(polyline);
+                                        }
                                     });
-                                }
-                                
-                                // Polyline으로 경로 그리기
-                                if (path.length > 0) {
-                                    new google.maps.Polyline({
-                                        path: path,
-                                        strokeColor: "#4285F4",
-                                        strokeOpacity: 0.8,
-                                        strokeWeight: 6,
-                                        map: map
-                                    });
-                                }
+                                });
                                 
                                 resolve(true);
                             } else {
                                 // 실패 시 직선으로 폴백
                                 console.warn(`경로 ${i+1} 그리기 실패 (${status}), 직선으로 표시합니다.`);
-                                new google.maps.Polyline({
+                                const style = getTransportStyle(travelMode, null);
+                                const fallbackPolyline = new google.maps.Polyline({
                                     path: [origin, destination],
-                                    strokeColor: "#FF6B6B",
+                                    strokeColor: TRANSPORT_COLORS.FALLBACK,
                                     strokeOpacity: 0.5,
                                     strokeWeight: 3,
-                                    map: map
+                                    map: map,
+                                    zIndex: 0
                                 });
+                                polylines.push(fallbackPolyline);
                                 resolve(false);
                             }
                         }
@@ -225,23 +319,84 @@ async function drawActualRoute(coords, places, courseData) {
         
         await Promise.all(routePromises);
         
+        // 범례 추가
+        addRouteLegend();
+        
     } catch (error) {
         console.error("실제 경로 그리기 실패, 직선으로 표시합니다:", error);
         // 폴백: 직선 경로
         if (coords.length > 1) {
-            new google.maps.Polyline({
+            const fallbackPolyline = new google.maps.Polyline({
                 path: coords,
-                strokeColor: "#0000FF",
+                strokeColor: TRANSPORT_COLORS.FALLBACK,
                 strokeOpacity: 0.8,
                 strokeWeight: 6,
-                map: map
+                map: map,
+                zIndex: 0
             });
+            polylines.push(fallbackPolyline);
         }
+    }
+};
+
+// 경로 범례 추가 함수
+function addRouteLegend() {
+    // 기존 범례 제거
+    const existingLegend = document.getElementById('route-legend');
+    if (existingLegend) {
+        existingLegend.remove();
+    }
+    
+    // 범례 생성
+    const legend = document.createElement('div');
+    legend.id = 'route-legend';
+    legend.style.cssText = `
+        position: absolute;
+        bottom: 20px;
+        left: 20px;
+        background: white;
+        padding: 12px 16px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        font-family: sans-serif;
+        font-size: 12px;
+        z-index: 1000;
+        max-width: 200px;
+    `;
+    
+    legend.innerHTML = `
+        <div style="font-weight: bold; margin-bottom: 8px; color: #333;">이동 수단</div>
+        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+            <div style="width: 20px; height: 4px; background: ${TRANSPORT_COLORS.WALKING}; margin-right: 8px; border-radius: 2px;"></div>
+            <span>도보</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+            <div style="width: 20px; height: 4px; background: ${TRANSPORT_COLORS.TRANSIT_SUBWAY}; margin-right: 8px; border-radius: 2px;"></div>
+            <span>지하철</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+            <div style="width: 20px; height: 4px; background: ${TRANSPORT_COLORS.TRANSIT_BUS}; margin-right: 8px; border-radius: 2px;"></div>
+            <span>버스</span>
+        </div>
+        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+            <div style="width: 20px; height: 4px; background: ${TRANSPORT_COLORS.DRIVING}; margin-right: 8px; border-radius: 2px;"></div>
+            <span>자동차</span>
+        </div>
+        <div style="display: flex; align-items: center;">
+            <div style="width: 20px; height: 4px; background: ${TRANSPORT_COLORS.BICYCLING}; margin-right: 8px; border-radius: 2px;"></div>
+            <span>자전거</span>
+        </div>
+    `;
+    
+    // 지도 컨테이너에 범례 추가
+    const mapContainer = document.getElementById('map-container');
+    if (mapContainer) {
+        mapContainer.appendChild(legend);
     }
 }
 
-// 주소 -> 좌표 변환 함수
-function geocodeAddress(address) {
+// 주소 -> 좌표 변환 함수 (전역으로 노출)
+window.geocodeAddress = function(address) {
     return new Promise((resolve, reject) => {
         geocoder.geocode({ address: address }, (results, status) => {
             if (status === "OK") {
@@ -270,10 +425,10 @@ function geocodeAddress(address) {
             }
         });
     });
-}
+};
 
-// 카드 생성 함수
-function createEnhancedCard(place, containerId, className = "card") {
+// 카드 생성 함수 (전역으로 노출)
+window.createEnhancedCard = function(place, containerId, className = "card") {
     const container = document.getElementById(containerId);
     if (!container) return;
     
@@ -329,7 +484,7 @@ function createEnhancedCard(place, containerId, className = "card") {
         </a>
     `;
     container.appendChild(card);
-}
+};
 
 // (a) 챗봇 로직
 async function sendMessage() {

@@ -43,6 +43,7 @@ interface FormData {
   visitTime: string;
   transportation: string[];
   customTransport: string; // Store custom transport input separately
+  budget: string; // 예산 정보
 }
 
 const steps = [
@@ -52,6 +53,7 @@ const steps = [
   { id: 'date', title: '방문 일자', question: '일정이 어떻게 되시나요?' },
   { id: 'visitTime', title: '방문 시간', question: '선호하는 시간대가 있으신가요?' },
   { id: 'transportation', title: '이동 수단', question: '주로 어떻게 이동하시나요?' },
+  { id: 'budget', title: '예산', question: '예상 예산이 얼마인가요?' },
   { id: 'review', title: '입력 확인', question: '이대로 일정을 생성할까요?' },
 ];
 
@@ -84,6 +86,7 @@ const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
     visitTime: '',
     transportation: [],
     customTransport: '',
+    budget: '',
   });
 
   // Reset state when opened
@@ -103,6 +106,7 @@ const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
         visitTime: '',
         transportation: [],
         customTransport: '',
+        budget: '',
       });
       setCurrentMonth(new Date());
     }
@@ -791,7 +795,73 @@ const handleNext = async () => {
                 </div>
             )}
 
-            {/* STEP 7: REVIEW */}
+            {/* STEP 7: BUDGET */}
+            {stepData.id === 'budget' && (
+                <div className="w-full">
+                    <p className="mb-6 text-gray-500 text-sm font-medium">
+                        예산을 입력하시면 예산에 맞는 코스를 추천해드립니다. (선택사항)
+                    </p>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                        {[
+                            { label: '5만원 이하', value: '50000' },
+                            { label: '5만원~10만원', value: '100000' },
+                            { label: '10만원~20만원', value: '200000' },
+                            { label: '20만원~50만원', value: '500000' },
+                            { label: '50만원 이상', value: '1000000' },
+                            { label: '직접 입력', value: 'custom' },
+                        ].map((option) => {
+                            const isSelected = formData.budget === option.value || 
+                                (option.value === 'custom' && formData.budget && !['50000', '100000', '200000', '500000', '1000000'].includes(formData.budget));
+                            
+                            return (
+                                <button
+                                    key={option.value}
+                                    onClick={() => {
+                                        if (option.value === 'custom') {
+                                            setFormData({...formData, budget: ''});
+                                        } else {
+                                            setFormData({...formData, budget: option.value});
+                                        }
+                                    }}
+                                    className={`py-6 px-6 rounded-xl border text-left transition-all duration-300 ${
+                                        isSelected
+                                        ? 'bg-black text-white border-black' 
+                                        : 'bg-white text-black border-gray-200 hover:border-black'
+                                    }`}
+                                >
+                                    <span className="block text-xl font-bold">{option.label}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                    {(formData.budget === '' || !['50000', '100000', '200000', '500000', '1000000'].includes(formData.budget)) && (
+                        <div className="animate-fade-in-up mt-6 w-full">
+                            <label className="block text-xs text-gray-400 mb-2 font-bold uppercase tracking-widest">예산 직접 입력 (원)</label>
+                            <input 
+                                type="text" 
+                                autoFocus
+                                placeholder="예: 150000 (선택사항)"
+                                value={formData.budget}
+                                onChange={(e) => {
+                                    const value = e.target.value.replace(/[^0-9]/g, '');
+                                    setFormData({...formData, budget: value});
+                                }}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                        handleNext();
+                                    }
+                                }}
+                                className="w-full text-2xl md:text-4xl border-b-2 border-gray-200 py-4 focus:border-black focus:outline-none bg-transparent transition-colors"
+                            />
+                            <div className="mt-6 text-gray-400 text-sm font-medium">
+                                ex) 150000 (15만원), 500000 (50만원) - 입력하지 않아도 됩니다
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* STEP 8: REVIEW */}
             {stepData.id === 'review' && (
                 <div className="bg-gray-50 p-8 rounded-2xl border border-gray-100">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-y-8 gap-x-12">
@@ -827,6 +897,12 @@ const handleNext = async () => {
                                     <span className="text-gray-400 italic">선택안함</span>
                                 )}
                             </div>
+                        </div>
+                        <div>
+                            <span className="text-xs text-gray-400 uppercase tracking-widest block mb-1">예산 (Budget)</span>
+                            <p className="text-xl font-medium">
+                                {formData.budget ? `${parseInt(formData.budget).toLocaleString()}원` : '입력되지 않음'}
+                            </p>
                         </div>
                     </div>
                 </div>

@@ -59,6 +59,8 @@ class RoutingAgent(BaseAgent):
         destination = input_data.get("destination")
         mode = input_data.get("mode", "transit")
         optimize_waypoints = input_data.get("optimize_waypoints", True)
+        preferred_modes = input_data.get("preferred_modes")  # 대안 교통수단 리스트
+        user_transportation = input_data.get("user_transportation")  # 원본 입력값
         
         # 경로 최적화 실행
         result = await self.maps_tool.execute(
@@ -66,7 +68,9 @@ class RoutingAgent(BaseAgent):
             origin=origin,
             destination=destination,
             mode=mode,
-            optimize_waypoints=optimize_waypoints
+            optimize_waypoints=optimize_waypoints,
+            preferred_modes=preferred_modes,  # 대안 교통수단 전달
+            user_transportation=user_transportation  # 원본 입력값 전달
         )
         
         return {

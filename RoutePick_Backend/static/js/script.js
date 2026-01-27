@@ -68,6 +68,16 @@ window.processLocations = async function(AdvancedMarkerElement, PinElement) {
     const places = data.places;
     const sequence = data.sequence || [];
     
+    // 날씨 정보 표시 (지도 왼쪽 위)
+    if (data.weather_info && Object.keys(data.weather_info).length > 0) {
+        // 첫 번째 날씨 정보 사용 (모든 장소가 같은 지역이므로 동일한 날씨)
+        const firstWeatherKey = Object.keys(data.weather_info)[0];
+        const weather = data.weather_info[firstWeatherKey];
+        if (weather && weather.temperature !== null && weather.temperature !== undefined) {
+            displayWeatherOnMap(weather);
+        }
+    }
+    
     // sequence 순서대로 places 재배열
     const orderedPlaces = [];
     if (sequence.length > 0) {
@@ -148,6 +158,15 @@ window.processLocations = async function(AdvancedMarkerElement, PinElement) {
     // 전역 변수 업데이트
     window.markers = markers;
     window.polylines = polylines;
+    
+    // 날씨 정보가 있으면 표시 (데이터에서 다시 확인)
+    if (data.weather_info && Object.keys(data.weather_info).length > 0) {
+        const firstWeatherKey = Object.keys(data.weather_info)[0];
+        const weather = data.weather_info[firstWeatherKey];
+        if (weather && weather.temperature !== null && weather.temperature !== undefined) {
+            displayWeatherOnMap(weather);
+        }
+    }
 };
 
 // 이동 수단별 색상 정의
@@ -466,6 +485,79 @@ function drawRouteFromServerData(routePaths) {
     }
 }
 
+// 지도 왼쪽 위에 날씨 정보 표시 함수
+function displayWeatherOnMap(weather) {
+    // 기존 날씨 정보 제거
+    const existingWeather = document.getElementById('weather-widget');
+    if (existingWeather) {
+        existingWeather.remove();
+    }
+    
+    // 날씨 위젯 생성
+    const weatherWidget = document.createElement('div');
+    weatherWidget.id = 'weather-widget';
+    weatherWidget.style.cssText = `
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(10px);
+        padding: 12px 16px;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-size: 14px;
+        z-index: 1000;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 180px;
+    `;
+    
+    // 날씨 아이콘 처리
+    let iconHtml = '🌤';
+    if (weather.icon) {
+        const iconType = weather.icon_type;
+        const icon = weather.icon;
+        // icon_type이 없거나 google이거나 http로 시작하면 전체 URL로 간주
+        const iconUrl = (!iconType || iconType === 'google' || icon.startsWith('http')) 
+            ? icon  // Google Weather API: 전체 URL 사용
+            : `https://openweathermap.org/img/wn/${icon}@2x.png`;  // OpenWeatherMap: 코드를 URL로 변환
+        iconHtml = `<img src="${iconUrl}" alt="${weather.condition || ''}" style="width: 32px; height: 32px; object-fit: contain;" />`;
+    }
+    
+    // 온도와 날씨 조건 표시
+    const temp = weather.temperature !== null && weather.temperature !== undefined 
+        ? `${Math.round(weather.temperature)}°C` 
+        : '';
+    const condition = weather.condition || weather.description || '';
+    
+    weatherWidget.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 10px; flex: 1;">
+            <div style="font-size: 24px; line-height: 1;">
+                ${iconHtml}
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 2px;">
+                <div style="font-weight: 700; font-size: 18px; color: #1a1a1a; line-height: 1.2;">
+                    ${temp}
+                </div>
+                <div style="font-size: 12px; color: #666; line-height: 1.2;">
+                    ${condition}
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 지도 컨테이너에 추가
+    const mapContainer = document.getElementById('map-container');
+    if (mapContainer) {
+        mapContainer.appendChild(weatherWidget);
+    }
+}
+
+// 전역으로 노출 (chatbot.js에서 사용)
+window.displayWeatherOnMap = displayWeatherOnMap;
+
 // 경로 범례 추가 함수
 function addRouteLegend() {
     // 기존 범례 제거
@@ -607,6 +699,23 @@ window.createEnhancedCard = function(place, containerId, className = "card") {
                 </div>
                 <p class="addr text-gray-600">${place.address || '주소 정보 없음'}</p>
                 ${place.description ? `<p class="desc text-gray-500">${place.description}</p>` : ''}
+                ${place.weather_info ? `
+                    <div style="display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 8px; background: rgba(59, 130, 246, 0.1); border-radius: 8px;">
+                        ${place.weather_info.icon ? (() => {
+                            // 아이콘 URL 처리 (Google Weather API는 전체 URL, OpenWeatherMap은 코드만)
+                            const icon = place.weather_info.icon;
+                            const iconType = place.weather_info.icon_type;
+                            // icon_type이 없거나 google이거나 http로 시작하면 전체 URL로 간주
+                            const iconUrl = (!iconType || iconType === 'google' || icon.startsWith('http')) 
+                                ? icon  // Google Weather API: 전체 URL 사용
+                                : `https://openweathermap.org/img/wn/${icon}@2x.png`;  // OpenWeatherMap: 코드를 URL로 변환
+                            return `<img src="${iconUrl}" alt="${place.weather_info.condition || ''}" style="width: 24px; height: 24px;" />`;
+                        })() : '🌤'}
+                        <span style="font-weight: 600; color: #1a1a1a; font-size: 14px;">${place.weather_info.temperature !== null && place.weather_info.temperature !== undefined ? `${place.weather_info.temperature}°C` : ''}</span>
+                        <span style="color: #666; font-size: 13px;">${place.weather_info.condition || place.weather_info.description || ''}</span>
+                        ${place.weather_info.humidity !== null && place.weather_info.humidity !== undefined ? `<span style="color: #888; font-size: 12px; margin-left: 4px;">습도 ${place.weather_info.humidity}%</span>` : ''}
+                    </div>
+                ` : ''}
             </div>
         </a>
     `;

@@ -222,6 +222,7 @@ async def execute_Agents(task_id, input_data):
         # 사용자 선호도 구성
         user_preferences = {
             "theme": input_data["theme"],
+            "location": input_data.get("location", ""),  # 지역 정보 추가 (날씨 조회용)
             "group_size": input_data.get("group_size", "1명"),
             "visit_date": input_data.get("visit_date") or "오늘",
             "visit_time": input_data.get("visit_time") or "오후",
@@ -312,6 +313,8 @@ async def execute_Agents(task_id, input_data):
             print("📍 방문 순서")
             print("-" * 70)
             
+            weather_info = final_course.get("weather_info", {})
+            
             for idx, place_idx in enumerate(sequence, 1):
                 if place_idx < len(places_list):
                     place = places_list[place_idx]
@@ -320,6 +323,14 @@ async def execute_Agents(task_id, input_data):
                     print(f"\n{idx}. {place.get('name', '알 수 없음')}")
                     print(f"   - 카테고리: {place.get('category', 'N/A')}")
                     print(f"   - 체류 시간: {duration}분")
+                    
+                    # 날씨 정보 출력
+                    if place_idx in weather_info:
+                        weather = weather_info[place_idx]
+                        if weather.get("temperature") is not None:
+                            print(f"   - 날씨: {weather.get('temperature')}°C, {weather.get('condition', '정보 없음')}")
+                            if weather.get("humidity") is not None:
+                                print(f"   - 습도: {weather.get('humidity')}%")
                     
             print()
 
@@ -759,13 +770,16 @@ def get_route_guide(task_id):
                 print("⚠️ 경로 안내 정보가 비어있습니다. 기본 안내를 제공합니다.")
                 return jsonify({"guide": create_basic_guide(), "route_paths": []})
             
-            # directions에 에러가 있는지 확인
-            has_errors = any(d.get("error") for d in directions)
-            has_empty_steps = all(not d.get("steps") or len(d.get("steps", [])) == 0 for d in directions)
+            # directions에 에러가 있는지 확인 (일부 구간만 에러가 있어도 나머지는 상세 안내 제공)
+            has_any_valid_directions = any(
+                d.get("steps") and len(d.get("steps", [])) > 0 and not d.get("error")
+                for d in directions
+            )
             
-            if has_errors or has_empty_steps:
-                print(f"⚠️ 경로 안내에 문제가 있습니다. has_errors={has_errors}, has_empty_steps={has_empty_steps}")
-                # 에러가 있거나 steps가 비어있으면 기본 안내 제공
+            # 모든 구간이 에러이거나 steps가 비어있을 때만 기본 안내 제공
+            if not has_any_valid_directions:
+                print(f"⚠️ 모든 구간의 경로 안내에 문제가 있습니다. 기본 안내를 제공합니다.")
+                # 모든 구간이 실패했을 때만 기본 안내 제공
                 return jsonify({"guide": create_basic_guide(), "route_paths": []})
             
             # 경로 안내 텍스트 생성 및 경로 좌표 정보 수집
@@ -781,11 +795,12 @@ def get_route_guide(task_id):
                 distance_text = direction.get("distance_text", "")
                 mode = direction.get("mode", transport_mode)
                 steps = direction.get("steps", [])
+                error = direction.get("error")
                 
                 # 디버깅: direction 데이터 확인
                 print(f"\n=== 구간 {i} 데이터 확인 ===")
                 print(f"from: {from_place}, to: {to_place}")
-                print(f"mode: {mode}, steps 개수: {len(steps)}")
+                print(f"mode: {mode}, steps 개수: {len(steps)}, error: {error}")
                 if steps and len(steps) > 0:
                     first_step = steps[0]
                     print(f"첫 번째 step 키들: {list(first_step.keys())}")
@@ -795,6 +810,29 @@ def get_route_guide(task_id):
                         print(f"⚠️ 첫 번째 step에 formatted_instruction이 없습니다!")
                 
                 guide_text += f"<strong>{i}. {from_place} → {to_place}</strong>\n"
+                
+                # 에러가 있거나 steps가 비어있으면 기본 안내만 제공
+                if error or not steps or len(steps) == 0:
+                    print(f"⚠️ 구간 {i}에 에러가 있거나 steps가 비어있습니다. 기본 안내를 제공합니다.")
+                    if transportation and '버스' in transportation:
+                        guide_text += f"   🚌 <strong>버스 안내:</strong>\n"
+                        guide_text += f"      • {from_place}에서 가장 가까운 버스 정류장으로 이동하세요.\n"
+                        guide_text += f"      • {to_place} 방면 버스를 이용하세요.\n"
+                    elif transportation and '지하철' in transportation:
+                        guide_text += f"   🚇 <strong>지하철 안내:</strong>\n"
+                        guide_text += f"      • {from_place}에서 가장 가까운 지하철역으로 이동하세요.\n"
+                        guide_text += f"      • {to_place} 방면 지하철을 이용하세요.\n"
+                    else:
+                        guide_text += f"   🚶 <strong>도보 안내:</strong>\n"
+                        guide_text += f"      • {from_place}에서 {to_place}로 도보로 이동하세요.\n"
+                    if from_addr:
+                        guide_text += f"      • 출발지 주소: {from_addr}\n"
+                    if to_addr:
+                        guide_text += f"      • 도착지 주소: {to_addr}\n"
+                    guide_text += "\n"
+                    continue  # 다음 구간으로
+                
+                # 정상적인 경우 상세 안내 제공
                 if from_addr:
                     guide_text += f"   📍 출발지: {from_addr}\n"
                 if to_addr:
@@ -847,17 +885,23 @@ def get_route_guide(task_id):
                             print(f"    → 내용: {formatted_inst[:100]}...")
                 
                 if has_formatted_instructions:
-                    # formatted_instruction이 있으면 모든 step의 formatted_instruction 사용
+                    # formatted_instruction이 있으면 모든 상세 정보를 사용 (이미지에 보이는 버스 번호, 정류장 등 포함)
                     guide_text += f"   📍 <strong>상세 이동 안내:</strong>\n"
+                    # 최대 10개 step까지 표시 (경로가 길 경우 대비)
+                    displayed_steps = 0
+                    max_steps = 10
                     for step_idx, step in enumerate(steps):
+                        if displayed_steps >= max_steps:
+                            break
                         formatted_instruction = step.get("formatted_instruction")
                         if formatted_instruction:
                             print(f"  ✅ 구간 {i}, step {step_idx} formatted_instruction 사용: {formatted_instruction[:50]}...")
-                            # 줄바꿈 처리
+                            # 이미지 로그에 보이는 모든 상세 정보를 보여주기 위해 줄 제한 제거
                             transit_info_lines = formatted_instruction.split('\n')
                             for line in transit_info_lines:
                                 if line.strip():  # 빈 줄 제외
                                     guide_text += f"      {line.strip()}\n"
+                            displayed_steps += 1
                     # formatted_instruction을 사용했으므로 다음 조건문 건너뛰기
                     guide_text += "\n"
                 # 대중교통 전용 상세 안내 (formatted_instruction이 없을 때만)
@@ -872,8 +916,9 @@ def get_route_guide(task_id):
                         guide_text += f"   🚌 <strong>대중교통 상세 안내:</strong>\n"
                         
                         transit_steps = []
+                        max_transit_steps = 5  # 최대 5개 step만 처리 (context 길이 제한)
                         
-                        for step_idx, step in enumerate(steps):
+                        for step_idx, step in enumerate(steps[:max_transit_steps]):  # 최대 5개만 처리
                             # 포맷팅된 instruction이 있으면 우선 사용
                             formatted_instruction = step.get("formatted_instruction")
                             transit_summary = step.get("transit_summary")
@@ -883,8 +928,9 @@ def get_route_guide(task_id):
                             # 디버깅: step 정보 확인
                             print(f"  구간 {i}, step {step_idx}: travel_mode={travel_mode}, formatted_instruction={'있음' if formatted_instruction else '없음'}, transit_details={'있음' if transit_detail else '없음'}")
                             
-                            # 포맷팅된 instruction이 있으면 사용
+                            # 포맷팅된 instruction이 있으면 사용 (모든 정보 포함)
                             if formatted_instruction:
+                                # 이미지 로그의 상세 정보를 위해 줄 제한 제거
                                 transit_steps.append(formatted_instruction)
                                 print(f"    → formatted_instruction 사용: {formatted_instruction[:50]}...")
                                 continue
@@ -1041,69 +1087,77 @@ def get_route_guide(task_id):
                     
                     # 상세 정보가 있으면 표시, 없으면 일반 안내
                     if transit_steps:
-                        for transit_info in transit_steps[:10]:  # 최대 10개 표시 (더 많은 정보 제공)
-                            # formatted_instruction이 여러 줄일 수 있으므로 줄바꿈 처리
+                        # 최대 10개까지 표시 (이미지에 보이는 상세 안내 포함)
+                        for transit_info in transit_steps[:10]:
+                            # 줄바꿈 처리
                             if isinstance(transit_info, str):
-                                # 줄바꿈을 <br>로 변환하여 HTML에서 제대로 표시되도록
+                                # 모든 상세 정보를 보여주기 위해 줄 제한 제거
                                 transit_info_lines = transit_info.split('\n')
                                 for line in transit_info_lines:
                                     if line.strip():  # 빈 줄 제외
                                         guide_text += f"      {line.strip()}\n"
                             else:
                                 guide_text += f"      {str(transit_info)}\n"
-                        else:
-                            # 폴백: transit_details가 없는 경우 디버깅 및 일반 안내
-                            # 디버깅: transit_details가 있는 step이 있는지 확인
-                            has_transit_details = any(step.get("transit_details") for step in steps)
-                            has_formatted = any(step.get("formatted_instruction") for step in steps)
-                            
-                            print(f"  ⚠️ 구간 {i} transit_steps가 비어있음. has_transit_details={has_transit_details}, has_formatted={has_formatted}")
-                            
-                            if has_formatted:
-                                # formatted_instruction이 있으면 강제로 사용
-                                guide_text += f"   📍 <strong>상세 이동 안내:</strong>\n"
-                                for step in steps:
-                                    formatted_instruction = step.get("formatted_instruction")
-                                    if formatted_instruction:
-                                        transit_info_lines = formatted_instruction.split('\n')
-                                        for line in transit_info_lines:
-                                            if line.strip():
-                                                guide_text += f"      {line.strip()}\n"
-                            elif has_transit_details:
-                                # transit_details는 있지만 파싱에 실패한 경우
-                                guide_text += f"      ⚠️ 대중교통 상세 정보를 가져오는 중 문제가 발생했습니다.\n"
-                                # 일반 안내 제공
-                                for step in steps[:5]:
-                                    instruction = clean_html_tags(step.get("instruction", ""))
-                                    if instruction:
-                                        guide_text += f"      • {instruction}\n"
-                            else:
-                                # 일반 안내 제공
-                                for step in steps[:5]:
-                                    instruction = clean_html_tags(step.get("instruction", ""))
-                                    if instruction:
-                                        guide_text += f"      • {instruction}\n"
+                    else:
+                        # 폴백: transit_details가 없는 경우 디버깅 및 일반 안내
+                        # 디버깅: transit_details가 있는 step이 있는지 확인
+                        has_transit_details = any(step.get("transit_details") for step in steps)
+                        has_formatted = any(step.get("formatted_instruction") for step in steps)
+                        
+                        print(f"  ⚠️ 구간 {i} transit_steps가 비어있음. has_transit_details={has_transit_details}, has_formatted={has_formatted}")
+                        
+                        if has_formatted:
+                            # formatted_instruction이 있으면 강제로 사용
+                            guide_text += f"   📍 <strong>상세 이동 안내:</strong>\n"
+                            for step_idx, step in enumerate(steps[:5]):  # 최대 5개까지
+                                formatted_instruction = step.get("formatted_instruction")
+                                if formatted_instruction:
+                                    transit_info_lines = formatted_instruction.split('\n')
+                                    # 모든 정보 표시
+                                    for line in transit_info_lines:
+                                        if line.strip():
+                                            guide_text += f"      {line.strip()}\n"
+                        elif has_transit_details:
+                            # transit_details는 있지만 파싱에 실패한 경우
+                            guide_text += f"      ⚠️ 대중교통 상세 정보를 가져오는 중 문제가 발생했습니다.\n"
+                            # 일반 안내 제공 (최대 3개만)
+                            for step in steps[:3]:  # 5개 -> 3개로 감소
+                                instruction = clean_html_tags(step.get("instruction", ""))
+                                if instruction:
+                                    # instruction이 너무 길면 요약
+                                    if len(instruction) > 80:
+                                        instruction = instruction[:77] + "..."
+                                    guide_text += f"      • {instruction}\n"
                 elif mode == "walking":
                     guide_text += f"   🚶 <strong>도보 안내:</strong>\n"
                     if steps:
-                        # 포맷팅된 instruction이 있으면 우선 사용
+                        # 포맷팅된 instruction이 있으면 우선 사용 (최대 5개 step만 처리)
                         formatted_steps = []
-                        for step in steps:
+                        for step in steps[:5]:  # 최대 5개만 처리
                             formatted_instruction = step.get("formatted_instruction")
                             if formatted_instruction:
-                                formatted_steps.append(formatted_instruction)
+                                # formatted_instruction이 너무 길면 첫 줄만 사용
+                                first_line = formatted_instruction.split('\n')[0]
+                                formatted_steps.append(first_line)
                             else:
                                 # 폴백: 기존 로직
                                 instruction = clean_html_tags(step.get("instruction", ""))
                                 distance_text = step.get("distance_text", "") or (step.get("distance", {}).get("text", "") if isinstance(step.get("distance"), dict) else "")
                                 if instruction:
+                                    # instruction이 너무 길면 요약
+                                    if len(instruction) > 60:
+                                        instruction = instruction[:57] + "..."
                                     step_info = f"🚶 {instruction}"
                                     if distance_text:
                                         step_info += f" ({distance_text})"
                                     formatted_steps.append(step_info)
                         
                         if formatted_steps:
-                            for step_info in formatted_steps[:5]:  # 최대 5개
+                            # 도보 안내는 최대 3개만 표시 (context 길이 최적화)
+                            for step_info in formatted_steps[:3]:  # 5개 -> 3개로 감소
+                                # step_info가 너무 길면 요약
+                                if len(step_info) > 100:
+                                    step_info = step_info[:97] + "..."
                                 guide_text += f"      {step_info}\n"
                         else:
                             guide_text += f"      • {from_place}에서 {to_place}로 도보로 이동하세요.\n"
@@ -1112,9 +1166,13 @@ def get_route_guide(task_id):
                 elif mode == "driving":
                     guide_text += f"   🚗 <strong>자동차 안내:</strong>\n"
                     if steps:
-                        for step in steps[:3]:  # 상위 3개 단계만 표시
+                        # 자동차 안내는 최대 2개만 표시하고, 긴 instruction은 요약 (context 길이 최적화)
+                        for step in steps[:2]:  # 3개 -> 2개로 감소
                             instruction = clean_html_tags(step.get("instruction", ""))
                             if instruction:
+                                # instruction이 너무 길면 요약
+                                if len(instruction) > 80:
+                                    instruction = instruction[:77] + "..."
                                 guide_text += f"      • {instruction}\n"
                     else:
                         guide_text += f"      • {from_place}에서 {to_place}로 자동차로 이동하세요.\n"

@@ -721,8 +721,14 @@ def get_route_guide(task_id):
     # 자전거는 완전히 제외됨
     
     # 사용자가 입력한 교통수단이 있으면 첫 번째 것을 사용
+    # 단, 대중교통(transit)이 포함되어 있으면 무조건 transit을 primary로 설정
     if preferred_modes:
-        transport_mode = preferred_modes[0]
+        # transit이 포함되어 있으면 transit을 우선 사용 (T Map API는 대중교통 미지원)
+        if 'transit' in preferred_modes:
+            transport_mode = 'transit'
+            print(f"🚇 대중교통 포함 감지: transit 모드로 설정 (T Map API는 대중교통 미지원)")
+        else:
+            transport_mode = preferred_modes[0]
     else:
         # 입력이 없으면 기본값 사용 (자전거는 제외)
         transport_mode = 'walking'
@@ -1077,6 +1083,17 @@ def get_route_guide(task_id):
                             "travel_mode": step_travel_mode,
                             "transit_details": step_transit_details
                         })
+                
+                # T Map API에서 반환한 route_coordinates가 있으면 우선 사용 (더 상세한 경로)
+                route_coordinates = direction.get("route_coordinates", [])
+                if route_coordinates and len(route_coordinates) > 0:
+                    # route_coordinates를 하나의 경로로 추가
+                    segment_paths.append({
+                        "path": route_coordinates,
+                        "travel_mode": mode.upper(),
+                        "transit_details": None
+                    })
+                
                 route_paths.append(segment_paths)
                 
                 # 디버깅: 경로 좌표 정보 로그

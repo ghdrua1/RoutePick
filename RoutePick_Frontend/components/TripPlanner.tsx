@@ -300,6 +300,46 @@ const steps = [
   { id: 'review', title: '입력 확인', question: '이대로 일정을 생성할까요?' },
 ];
 
+// 랜덤 테마 후보
+const RANDOM_THEMES: string[] = [
+  '비 오는 날 실내 데이트 여행',
+  '가벼운 산책과 카페 위주의 하루',
+  '사진 많이 찍는 감성 여행',
+  '조용히 힐링하는 휴식 여행',
+  '야경 보면서 걷는 저녁 산책 여행',
+  '맛있는 음식 위주의 먹방 여행',
+  '커플을 위한 로맨틱 산책 여행',
+  '가족과 함께하는 여유로운 당일치기 여행',
+  '친구들과 가볍게 즐기는 소도시 여행',
+  '전통과 분위기를 함께 느끼는 문화 탐방 여행',
+  '드라이브와 카페를 함께 즐기는 데이트 여행',
+  '반려동물과 함께하는 산책 위주 여행',
+  '아이들과 놀이 중심의 가족 여행',
+  '조용한 서점과 카페를 도는 혼자만의 취향 여행',
+  '야시장과 길거리 음식을 즐기는 야간 여행',
+  '핫플 대신 숨은 로컬 맛집을 찾는 로컬 탐방 여행',
+  '전시와 공연을 중심으로 한 문화 예술 여행',
+  '바다 보면서 산책하는 여유로운 힐링 여행',
+  '호캉스와 주변 산책을 가볍게 즐기는 휴식 여행',
+  '한적한 카페에서 공부·작업하는 워케이션 느낌 여행',
+  '사진 스팟 위주로 인생샷을 남기는 여행',
+  '새로운 동네를 탐험하는 동네 산책 여행',
+  '야외 피크닉과 산책을 함께 즐기는 감성 여행',
+  '밤늦게까지 즐기는 감성 바·라운지 위주 여행',
+  '체험 활동(공방 등)을 중심으로 한 액티비티 여행',
+  '계절 감성을 느끼는 계절 한정 테마 여행',
+  '아날로그 감성을 찾아 떠나는 레코드숍과 빈티지 소품숍 여행',
+  '갓 구운 빵 냄새를 따라가는 빵순이·빵돌이를 위한 빵지순례 여행',
+  '환경을 생각하는 비건 맛집과 제로웨이스트 숍 중심의 가치 소비 여행',
+  '일몰 시간에 맞춰 황홀한 노을을 감상하는 낭만적인 선셋 산책 여행',
+  '루프탑에서 도심의 야경을 한눈에 담으며 즐기는 힙한 감성 여행',
+  '가벼운 산행 후 숲속에서 즐기는 건강한 보양식과 맑은 공기 여행',
+  '꽃 시장과 식물 카페를 돌며 마음을 정화하는 싱그러운 가드닝 여행',
+  '오래된 골목길 속 숨겨진 이야기와 전통을 찾아가는 역사 산책 여행',
+  '미술관 옆 예쁜 길을 따라 걷는 여유로운 아트 갤러리 투어',
+  '복잡한 도심을 벗어나 강변 공원에서 책 한 권과 함께하는 물멍 피크닉 여행'
+];
+
 const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
   const [currentStep, setCurrentStep] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
@@ -317,7 +357,7 @@ const TripPlanner: React.FC<TripPlannerProps> = ({ isOpen, onClose }) => {
   // Loading Animation State
   const [activeLoadingStep, setActiveLoadingStep] = useState(0);
   
-  // 2. 알림창 제어를 위한 State 추가 (컴포넌트 내부에 추가해주세요)
+  // 2. 알림창 제어를 위한 State 추가 
   const [currentLog, setCurrentLog] = useState("여행 생성 요청 중..."); // 현재 표시할 메시지
   const [showLog, setShowLog] = useState(false); // 알림창 보임/숨김 여부
   const lastLogRef = useRef(""); // 중복 메시지 깜빡임 방지용
@@ -418,10 +458,6 @@ const handleNext = async () => {
         // 마지막 단계: 로딩 시작
         setIsLoading(true);
         setShowLog(true); // 로딩 시작되자마자 알림창 띄우기
-
-        // [중요] 기존의 setTimeout(..., 20000) 코드는 삭제했습니다.
-        // 실제 백엔드 응답에 맞춰서 종료되도록 변경합니다.
-
       try {
         // 1. Flask 서버에 데이터 전송
         const response = await fetch('http://127.0.0.1:5000/api/create-trip', {
@@ -444,8 +480,6 @@ const handleNext = async () => {
           try {
             const statusResponse = await fetch(`http://127.0.0.1:5000/status/${taskId}`);
             const statusData = await statusResponse.json();
-
-            // [추가된 부분] 백엔드 메시지를 화면에 반영 (메시지가 바뀌었을 때만)
             if (statusData.message && statusData.message !== lastLogRef.current) {
                 lastLogRef.current = statusData.message;
                 
@@ -458,7 +492,7 @@ const handleNext = async () => {
 
             if (statusData.done) {
               clearInterval(pollStatus); // 폴링 중단
-              setIsLoading(false); // 로딩 끝 (이때 모든 애니메이션이 멈춥니다)
+              setIsLoading(false); // 로딩 끝 
 
               if (statusData.success) {
                 // 성공 시 이동
@@ -903,6 +937,24 @@ const handleNext = async () => {
                     />
                     <div className="mt-6 text-gray-400 text-sm font-medium">
                         ex) 여자친구와 비 오는 날 강남 실내 데이트, 가족과의 잔잔한 전주 여행
+                    </div>
+                    <div className="mt-4 flex justify-start">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (RANDOM_THEMES.length === 0) return;
+                            let nextTheme = RANDOM_THEMES[Math.floor(Math.random() * RANDOM_THEMES.length)];
+                            // 현재 테마와 동일하면 한 번 더 시도 (후보가 2개 이상일 때)
+                            if (RANDOM_THEMES.length > 1 && nextTheme === formData.theme) {
+                              nextTheme = RANDOM_THEMES[Math.floor(Math.random() * RANDOM_THEMES.length)];
+                            }
+                            setFormData(prev => ({ ...prev, theme: nextTheme }));
+                          }}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-gray-200 text-sm font-medium text-gray-700 hover:border-black hover:text-black hover:bg-gray-50 transition-colors"
+                        >
+                          <Sparkles className="w-4 h-4" />
+                          랜덤 테마 생성
+                        </button>
                     </div>
                 </div>
             )}

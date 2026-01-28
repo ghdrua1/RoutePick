@@ -622,30 +622,49 @@ check_routing(places=[장소리스트], mode="transit")
         if not response_content:
             raise ValueError("LLM이 빈 응답을 반환했습니다. Agent가 작업을 완료하지 못했을 수 있습니다.")
         
-        try:
-            result = self._JSON_verification(response_content)
-        except ValueError as json_error:
-            # JSON 파싱 실패 시 더 자세한 정보 제공
-            error_msg = str(json_error)
-            print(f"❌ JSON 파싱 실패: {error_msg}")
-            
-            # 중간 단계 정보 출력
-            if 'intermediate_steps' in planning_result:
-                print(f"   Agent 실행 단계: {len(planning_result.get('intermediate_steps', []))}개")
-            
-            # 응답 내용 일부 출력
-            print(f"   응답 내용 (처음 500자): {response_content[:500]}")
-            
-            # 폴백: 최소한의 JSON 구조라도 생성 시도
-            print(f"   ⚠️ JSON 파싱 실패로 인해 기본 코스 구조를 생성합니다...")
-            # 빈 코스 구조 반환 (나중에 검증 로직에서 처리)
+        # LangChain Agent가 최대 반복 횟수 초과로 중단될 경우,
+        # output 필드에 'Agent stopped due to max iterations.' 같은 문장을 그대로 넣어 주는 경우가 있다.
+        # 이 문자열은 JSON이 아니므로, JSON 파싱을 시도하기 전에 특별 처리하여
+        # 불필요한 JSON 파싱 에러를 피하고, 사용자에게는 완만한 폴백 코스를 제공한다.
+        lower_output = response_content.lower()
+        if (
+            "max iterations" in lower_output
+            or "max_iterations" in lower_output
+            or "agent stopped" in lower_output
+        ):
+            print("⚠️ Agent가 최대 반복 횟수로 인해 중단되었습니다. 기본 코스 구조를 반환합니다.")
             result = {
                 "selected_places": [],
                 "sequence": [],
                 "estimated_duration": {},
-                "course_description": "코스 생성 중 오류가 발생했습니다.",
-                "reasoning": f"JSON 파싱 오류: {error_msg}"
+                "course_description": "코스 생성 중 Agent가 최대 반복 횟수에 도달하여 기본 코스를 반환했습니다.",
+                "reasoning": "Agent stopped due to max iterations.",
             }
+        else:
+            try:
+                result = self._JSON_verification(response_content)
+            except ValueError as json_error:
+                # JSON 파싱 실패 시 더 자세한 정보 제공
+                error_msg = str(json_error)
+                print(f"❌ JSON 파싱 실패: {error_msg}")
+                
+                # 중간 단계 정보 출력
+                if 'intermediate_steps' in planning_result:
+                    print(f"   Agent 실행 단계: {len(planning_result.get('intermediate_steps', []))}개")
+                
+                # 응답 내용 일부 출력
+                print(f"   응답 내용 (처음 500자): {response_content[:500]}")
+                
+                # 폴백: 최소한의 JSON 구조라도 생성 시도
+                print(f"   ⚠️ JSON 파싱 실패로 인해 기본 코스 구조를 생성합니다...")
+                # 빈 코스 구조 반환 (나중에 검증 로직에서 처리)
+                result = {
+                    "selected_places": [],
+                    "sequence": [],
+                    "estimated_duration": {},
+                    "course_description": "코스 생성 중 오류가 발생했습니다.",
+                    "reasoning": f"JSON 파싱 오류: {error_msg}"
+                }
 
         # ============================================================
         # [최종 버그 수정] LLM이 반환한 인덱스 유효성 검증

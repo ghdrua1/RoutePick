@@ -37,7 +37,6 @@ class GoogleMapsTool(BaseTool):
                 return "***"
             return f"{key[:4]}...{key[-4:]}"
         
-        # 후보 키 우선순위: google_maps_api_key > 환경변수 GOOGLE_MAPS_API_KEY > api_key
         candidate_keys = [
             ("google_maps_api_key", self.config.get("google_maps_api_key")),
             ("env:GOOGLE_MAPS_API_KEY", os.getenv("GOOGLE_MAPS_API_KEY")),
@@ -460,6 +459,9 @@ class GoogleMapsTool(BaseTool):
             }
         """
         try:
+            # 사용자가 지정한 출발 일시(문자열)를 받아 Distance Matrix 등에 활용할 수 있도록 저장
+            # 형식 예시: "2026-01-30T10:00:00"
+            self._departure_time_str = kwargs.get("departure_time")
             if not self.validate_params(places=places):
                 return {
                     "success": False,
@@ -610,7 +612,6 @@ class GoogleMapsTool(BaseTool):
         
         loop = asyncio.get_event_loop()
         try:
-            # 지오코딩 요청 후보 구성 (한국 한정 파라미터 제거)
             requests = [{"address": normalized_address}]
             
             for req in requests:
@@ -963,7 +964,7 @@ class GoogleMapsTool(BaseTool):
                     waypoints=waypoints,
                     optimize_waypoints=True,
                     mode=mode,
-                    language='ko'  # 한국어 설정
+                    language='ko'
                 )
             
             directions_result = await loop.run_in_executor(None, call_directions)
@@ -1307,10 +1308,23 @@ class GoogleMapsTool(BaseTool):
             return None
         
         try:
-            # 현재 시간 또는 여행 시작 시간을 departure_time으로 설정
-            # 대중교통은 시간에 따라 소요 시간이 달라지므로 현재 시간 기준으로 계산
+            # 출발 시간 설정:
+            # - 프론트에서 전달된 사용자 시작일/시간(departure_time)을 우선 사용
+            # - 없으면 현재 시간을 사용
             import datetime
-            departure_time = datetime.datetime.now()
+            departure_time = None
+            dt_raw = getattr(self, "_departure_time_str", None)
+            if isinstance(dt_raw, str) and dt_raw:
+                try:
+                    # ISO 형식 또는 "YYYY-MM-DD HH:MM" 형식 처리
+                    if "T" in dt_raw:
+                        departure_time = datetime.datetime.fromisoformat(dt_raw)
+                    else:
+                        departure_time = datetime.datetime.strptime(dt_raw, "%Y-%m-%d %H:%M")
+                except Exception:
+                    departure_time = None
+            if departure_time is None:
+                departure_time = datetime.datetime.now()
 
             # 모든 좌표를 문자열로 변환 (coordinates 기준)
             coord_strings = [f"{coord[0]},{coord[1]}" for coord in coordinates]
@@ -1660,7 +1674,6 @@ class GoogleMapsTool(BaseTool):
             return await self._calculate_directions(places, origin, destination, mode, preferred_modes, user_transportation)
         
         # Waypoints가 있고, 대중교통이 아니고, 10개 이하인 경우만 일괄 요청 시도
-        # (실제로는 이 경우가 거의 없지만, 혹시 모를 경우를 대비)
         loop = asyncio.get_event_loop()
         # Directions API에는 문자열이 아닌 (lat, lng) 튜플을 그대로 전달하여
         # 좌표가 문자열 포맷 과정에서 잘리는 일을 방지한다.
@@ -1680,14 +1693,14 @@ class GoogleMapsTool(BaseTool):
                             waypoints=waypoints,
                             optimize_waypoints=False,  # 이미 최적화되어 있으므로 False
                             mode=primary_mode,
-                            language='ko'  # 한국어 설정
+                            language='ko'  
                         )
                     else:
                         return self.client.directions(
                             origin=origin_tuple,
                             destination=dest_tuple,
                             mode=primary_mode,
-                            language='ko'  # 한국어 설정
+                            language='ko' 
                         )
                 
                 directions_result = await loop.run_in_executor(None, call_directions)

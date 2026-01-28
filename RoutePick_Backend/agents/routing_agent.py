@@ -61,6 +61,7 @@ class RoutingAgent(BaseAgent):
         optimize_waypoints = input_data.get("optimize_waypoints", True)
         preferred_modes = input_data.get("preferred_modes")  # 대안 교통수단 리스트
         user_transportation = input_data.get("user_transportation")  # 원본 입력값
+        departure_time = input_data.get("departure_time")  # 출발 일시 (ISO 문자열 등)
         
         # 경로 최적화 실행
         result = await self.maps_tool.execute(
@@ -70,7 +71,8 @@ class RoutingAgent(BaseAgent):
             mode=mode,
             optimize_waypoints=optimize_waypoints,
             preferred_modes=preferred_modes,  # 대안 교통수단 전달
-            user_transportation=user_transportation  # 원본 입력값 전달
+            user_transportation=user_transportation,  # 원본 입력값 전달
+            departure_time=departure_time,  # 출발 일시 전달 (대중교통 소요 시간 계산용)
         )
         
         return {

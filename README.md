@@ -11,19 +11,6 @@
 [![Vite](https://img.shields.io/badge/Vite-Build_Tool-646CFF?style=flat&logo=vite&logoColor=white)](https://vitejs.dev/)
 [![Google Maps API](https://img.shields.io/badge/Google_Maps-JS_Rendering-4285F4?style=flat&logo=googlemaps&logoColor=white)](https://developers.google.com/maps)
 
-## 📋 목차
-
-- [주요 기능](#주요-기능)
-- [시스템 아키텍처](#시스템-아키텍처)
-- [기술 스택](#기술-스택)
-- [설치 및 실행](#설치-및-실행)
-- [환경 변수 설정](#환경-변수-설정)
-- [사용 방법](#사용-방법)
-- [프로젝트 구조](#프로젝트-구조)
-- [API 문서](#api-문서)
-- [개발 가이드](#개발-가이드)
-- [문제 해결](#문제-해결)
-
 ---
 
 ## ✨ 주요 기능
@@ -56,6 +43,9 @@
 - 날씨 정보 표시
 
 ---
+
+## 작동 화면
+<img src="https://github.com/user-attachments/assets/79dd00c5-b0cb-4082-b91d-b26b3356a88a" width="90%" alt="RoutePick 시스템 아키텍처">
 
 ## 🏗️ 시스템 아키텍처
 
@@ -151,34 +141,9 @@ GOOGLE_MAPS_API_KEY=your_google_maps_api_key
 OPENAI_API_KEY=your_openai_api_key
 T_MAP_API_KEY=your_tmap_api_key
 OPENWEATHER_API_KEY=your_openweather_api_key
-
-# 선택사항
-LLM_MODEL=gpt-4o-mini
 ```
 
-### 5. 실행
 
-#### 백엔드 실행
-
-```bash
-cd RoutePick_Backend
-python app.py
-```
-
-백엔드는 기본적으로 `http://localhost:5000`에서 실행됩니다.
-
-#### 프론트엔드 실행
-
-```bash
-cd RoutePick_Frontend
-npm run dev
-# 또는
-yarn dev
-```
-
-프론트엔드는 기본적으로 `http://localhost:5173`에서 실행됩니다.
-
----
 
 ## ⚙️ 환경 변수 설정
 
@@ -388,11 +353,6 @@ RoutePick/
 
 ---
 
-## 📝 라이선스
-
-이 프로젝트는 MIT 라이선스를 따릅니다.
-
----
 
 ## 📚 추가 문서
 
@@ -401,11 +361,5 @@ RoutePick/
 ---
 
 
-이 프로젝트는 다음 오픈소스 및 API를 사용합니다:
-- [Tavily](https://tavily.com) - 실시간 웹 검색
-- [Google Maps Platform](https://developers.google.com/maps) - 지도 및 경로 서비스
-- [T Map Open API](https://openapi.sk.com) - 한국 내 경로 안내
-- [OpenAI](https://openai.com) - LLM 서비스
-- [OpenWeather](https://openweathermap.org) - 날씨 정보
 
 

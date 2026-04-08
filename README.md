@@ -1,6 +1,15 @@
 # RoutePick 🗺️
 
-실시간 웹 검색과 지도 API를 결합하여 사용자의 니즈에 최적화된 여행/데이트 코스를 설계하는 멀티 에이전트 시스템입니다.
+> 실시간 웹 검색과 지도 API를 결합하여 사용자의 니즈에 최적화된 여행/데이트 코스를 설계하는 멀티 에이전트 시스템입니다.
+
+[![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Flask](https://img.shields.io/badge/Flask-Web_Framework-000000?style=flat&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
+[![LangChain](https://img.shields.io/badge/LangChain-LLM_Agent-1C3C3C?style=flat&logo=langchain&logoColor=white)](https://www.langchain.com/)
+[![OpenAI](https://img.shields.io/badge/OpenAI-GPT_Model-412991?style=flat&logo=openai&logoColor=white)](https://openai.com/)
+[![React](https://img.shields.io/badge/React-18+-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Ready-3178C6?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-Build_Tool-646CFF?style=flat&logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Google Maps API](https://img.shields.io/badge/Google_Maps-JS_Rendering-4285F4?style=flat&logo=googlemaps&logoColor=white)](https://developers.google.com/maps)
 
 ## 📋 목차
 
